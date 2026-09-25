@@ -322,22 +322,40 @@ run_recipe(const char *dir, struct ph_recipe *r, int logfd)
 
 /* ------------------------------------------------------------------ *
  * Slug allocation
+ *
+ * The directory IS the claim.
+ *
+ * Looking for an unused name and then creating it leaves a window in
+ * which another import takes the same name -- and because a failed import
+ * removes its game directory on the way out, the loser of that race would
+ * delete the winner's game.  mkdir(2) is the only step here that is
+ * atomic against a concurrent import, so it is the step that allocates:
+ * success means the name is ours, EEXIST means somebody else holds it and
+ * the next name is tried.  Any other error is a real failure.
  * ------------------------------------------------------------------ */
 static int
-unique_slug(const struct ph_paths *p, const char *want, char *out, size_t outsize)
+claim_slug(const struct ph_paths *p, const char *want, char *slug,
+    size_t slugsize, char *dir, size_t dirsize)
 {
-	char probe[PH_PATH_MAX];
 	int n;
 
-	if (strlcpy(out, want, outsize) >= outsize)
-		return -1;
-	for (n = 2; n < 1000; n++) {
-		if (ph_join(probe, sizeof(probe), p->games, out) != 0)
+	for (n = 1; n < 1000; n++) {
+		if (n == 1) {
+			if (strlcpy(slug, want, slugsize) >= slugsize)
+				return -1;
+		} else if ((size_t)snprintf(slug, slugsize, "%s-%d", want, n)
+		    >= slugsize) {
 			return -1;
-		if (!ph_is_dir(probe))
-			return 0;
-		if ((size_t)snprintf(out, outsize, "%s-%d", want, n) >= outsize)
+		}
+		if (ph_join(dir, dirsize, p->games, slug) != 0)
 			return -1;
+		if (mkdir(dir, 0755) == 0)
+			return 0;		/* claimed */
+		if (errno != EEXIST) {
+			ph_warn("cannot create %s: %s", dir, strerror(errno));
+			return -1;
+		}
+		/* taken -- by an existing game or by a concurrent import */
 	}
 	return -1;
 }
@@ -412,29 +430,17 @@ ph_install(const struct ph_paths *p, const char *src,
 			ph_warn("cannot create %s: %s", p->games, strerror(errno));
 			return -1;
 		}
-		if (unique_slug(p, want, slug, sizeof(slug)) != 0) {
-			ph_warn("cannot allocate a slug for '%s'", title);
+		if (claim_slug(p, want, slug, sizeof(slug),
+		    gamedir, sizeof(gamedir)) != 0) {
+			ph_warn("cannot allocate a directory for '%s'", title);
 			return -1;
 		}
+		made_dir = 1;
 	}
-	if (ph_join(gamedir, sizeof(gamedir), p->games, slug) != 0 ||
-	    ph_join(gameroot, sizeof(gameroot), gamedir, "root") != 0) {
+	if (ph_join(gameroot, sizeof(gameroot), gamedir, "root") != 0) {
 		ph_warn("path too long for '%s'", slug);
-		return -1;
+		goto out;		/* removes the directory just claimed */
 	}
-	/*
-	 * mkdir(2), not ph_mkdirp(): mkdirp treats EEXIST as success, so two
-	 * imports racing on the same title would both "create" the same
-	 * directory, and whichever failed first would take the other's game
-	 * with it down the ph_rmtree(gamedir) cleanup path.  An exclusive
-	 * create makes the winner unambiguous, and losing means picking
-	 * another slug rather than sharing one.
-	 */
-	if (mkdir(gamedir, 0755) != 0) {
-		ph_warn("cannot create %s: %s", gamedir, strerror(errno));
-		return -1;
-	}
-	made_dir = 1;
 	logfd = open_log(gamedir);
 
 	/* --- 1. archive -> staging ------------------------------------ */
