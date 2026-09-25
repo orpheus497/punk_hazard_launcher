@@ -11,4 +11,4 @@ Terminal=false
 Categories=Game;
 Keywords=game;games;launcher;library;retro;console;arcade;
 StartupNotify=false
-StartupWMClass=punkhazard
+StartupWMClass=punk_hazard

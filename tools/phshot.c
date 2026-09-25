@@ -137,7 +137,7 @@ main(int argc, char **argv)
 	unsigned char *px;
 	const char *out = "shot.png", *want_theme = NULL, *search = NULL;
 	int w = 1600, h = 900, crt = -1, select_n = 0, help = 0, tab = 0;
-	int opt_n = 0, sort_n = 0, field_n = 0, i, f, pw, ph_h;
+	int opt_n = 0, sort_n = 0, field_n = 0, rm_n = 0, i, f, pw, ph_h;
 	const char *form = NULL, *typed = NULL;
 	int submit = 0;
 
@@ -151,6 +151,8 @@ main(int argc, char **argv)
 		else if (strcmp(argv[i], "--help-overlay") == 0) help = 1;
 		else if (strcmp(argv[i], "--tab") == 0) tab = 1;
 		else if (strcmp(argv[i], "--submit") == 0) submit = 1;
+		else if (strcmp(argv[i], "--remove-presses") == 0 && i + 1 < argc)
+			rm_n = atoi(argv[++i]);
 		else if (strcmp(argv[i], "--form") == 0 && i + 1 < argc) form = argv[++i];
 		else if (strcmp(argv[i], "--field") == 0 && i + 1 < argc) field_n = atoi(argv[++i]);
 		else if (strcmp(argv[i], "--type") == 0 && i + 1 < argc) typed = argv[++i];
@@ -210,6 +212,19 @@ main(int argc, char **argv)
 		ph_ui_action(ui, PH_ACT_RIGHT);
 	for (i = 0; i < sort_n; i++)
 		ph_ui_action(ui, PH_ACT_SORT);
+	if (rm_n > 0) {
+		/* Does the delete guard hold?  Report whether a REMOVE
+		 * request was actually emitted after rm_n activations. */
+		struct ph_game *g = NULL;
+		enum ph_req r;
+
+		for (i = 0; i < rm_n; i++)
+			ph_ui_action(ui, PH_ACT_REMOVE);
+		r = ph_ui_poll(ui, &g);
+		printf("remove-presses=%d -> request=%s game=%s\n", rm_n,
+		    r == PH_REQ_REMOVE ? "REMOVE" : "none",
+		    (r == PH_REQ_REMOVE && g != NULL) ? g->slug : "-");
+	}
 	if (tab) {
 		ph_ui_action(ui, PH_ACT_DETAILS);	/* focus the panel */
 		for (i = 0; i < opt_n; i++)

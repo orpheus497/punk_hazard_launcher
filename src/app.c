@@ -179,7 +179,16 @@ ph_app_run(const struct ph_paths *p)
 	struct ph_input  *in = NULL;
 	struct ph_embed  *emb = NULL;
 	struct ph_session sess;
-	struct ph_game   *sess_game = NULL;
+	/*
+	 * A running session is identified by slug, never by a pointer into
+	 * lib.v.  The launcher keeps handling input while a game runs, and
+	 * sorting, favouriting or rescanning reorders or frees that array --
+	 * a stored pointer would then name a different game, or freed
+	 * memory, and ph_launch_finish would write the session's playtime
+	 * into the wrong manifest.
+	 */
+	char              sess_slug[PH_SLUG_MAX] = "";
+	char              sess_title[PH_TITLE_MAX] = "";
 	int               sess_embedded = 0, game_full = 0;
 	struct ph_lib     lib;
 	struct ph_config  cfg;
@@ -217,11 +226,22 @@ ph_app_run(const struct ph_paths *p)
 	SDL_SetHint(SDL_HINT_VIDEO_X11_FORCE_EGL, "1");
 	SDL_SetHint(SDL_HINT_VIDEO_HIGHDPI_DISABLED, "0");
 	/*
-	 * The window's WM class must equal StartupWMClass in
-	 * punk_hazard.desktop, or a taskbar cannot tell that this window
-	 * belongs to that launcher entry and shows a generic icon beside a
-	 * duplicate entry. SDL derives the class from this hint.
+	 * The window's class must equal StartupWMClass in
+	 * punk_hazard.desktop -- and, on Wayland, the .desktop basename --
+	 * or the desktop cannot tell that this window belongs to that
+	 * launcher entry, and shows a generic icon beside a duplicate.
+	 *
+	 * SDL does NOT take this from SDL_HINT_APP_NAME.  Its X11 backend
+	 * reads the environment variable SDL_VIDEO_X11_WMCLASS and, failing
+	 * that, resolves the executable through /proc; the Wayland backend
+	 * reads SDL_VIDEO_WAYLAND_WMCLASS and falls back to the X11 one.
+	 * Relying on the /proc path would be relying on luck here: FreeBSD,
+	 * the target, does not mount procfs by default, so the class would
+	 * fall through to SDL's own default.  Set it explicitly, before
+	 * SDL_Init, so both backends agree with the desktop entry.
 	 */
+	SDL_setenv("SDL_VIDEO_X11_WMCLASS", PH_APPID, 1);
+	SDL_setenv("SDL_VIDEO_WAYLAND_WMCLASS", PH_APPID, 1);
 	SDL_SetHint(SDL_HINT_APP_NAME, PH_NAME);
 
 	if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0) {
@@ -433,11 +453,19 @@ ph_app_run(const struct ph_paths *p)
 			case PH_REQ_LAUNCH:
 				if (target == NULL)
 					break;
+				if (sess_slug[0] != '\0') {
+					ph_ui_toast(ui, "%s is still running",
+					    sess_title);
+					break;
+				}
 				if (emb != NULL && ph_embed_why_not(emb) == NULL) {
 					/* Non-blocking: the loop keeps drawing
 					 * the chrome around the game. */
 					if (ph_launch_start(target, &sess) == 0) {
-						sess_game = target;
+						strlcpy(sess_slug, target->slug,
+						    sizeof(sess_slug));
+						strlcpy(sess_title, target->title,
+						    sizeof(sess_title));
 						sess_embedded = 0;
 						game_full = 0;
 						ph_ui_set_running(ui,
@@ -456,6 +484,12 @@ ph_app_run(const struct ph_paths *p)
 			case PH_REQ_INSTALL: {
 				const struct ph_ui_install *in_req =
 				    ph_ui_install_data(ui);
+
+				if (sess_slug[0] != '\0') {
+					ph_ui_toast(ui, "cannot import while "
+					    "%s is running", sess_title);
+					break;
+				}
 				struct ph_install_opts o;
 				char slug[PH_SLUG_MAX];
 
@@ -496,6 +530,11 @@ ph_app_run(const struct ph_paths *p)
 			}
 
 			case PH_REQ_REMOVE:
+				if (sess_slug[0] != '\0') {
+					ph_ui_toast(ui, "cannot remove while "
+					    "%s is running", sess_title);
+					break;
+				}
 				if (target != NULL) {
 					char slug[PH_SLUG_MAX];
 
@@ -521,13 +560,13 @@ ph_app_run(const struct ph_paths *p)
 		}
 
 		/* ---- a game is starting or running ---------------------- */
-		if (sess_game != NULL) {
+		if (sess_slug[0] != '\0') {
 			int st = 0;
 
 			if (!sess_embedded &&
 			    ph_embed_try_capture(emb, sess.pid)) {
 				sess_embedded = 1;
-				ph_ui_set_running(ui, sess_game->title, 1);
+				ph_ui_set_running(ui, sess_title, 1);
 			}
 			if (sess_embedded) {
 				int gx, gy, gw, gh, ww = 0, wh = 0;
@@ -556,21 +595,33 @@ ph_app_run(const struct ph_paths *p)
 			}
 			if (ph_launch_poll(&sess, &st) == 1) {
 				struct ph_run_result res;
+				struct ph_game *g;
 				char when[48];
 
 				ph_embed_release(emb);
-				ph_launch_finish(sess_game, &sess, st, &res);
+				/*
+				 * Resolve the slug now: the array may have
+				 * been reordered or refilled while the game
+				 * ran.  If the game is gone the child has
+				 * still been reaped by ph_launch_poll; only
+				 * the statistics are lost.
+				 */
+				res.status = st;
+				res.seconds = 0;
+				if ((g = ph_lib_find(&lib, sess_slug)) != NULL)
+					ph_launch_finish(g, &sess, st, &res);
 				ph_human_time(when, sizeof(when), res.seconds);
 				if (st == 0)
 					ph_ui_toast(ui,
 					    "%s \xe2\x80\x94 played %s",
-					    sess_game->title, when);
+					    sess_title, when);
 				else
 					ph_ui_toast(ui,
 					    "%s exited with status %d after %s",
-					    sess_game->title, st, when);
+					    sess_title, st, when);
 				ph_ui_set_running(ui, NULL, 0);
-				sess_game = NULL;
+				sess_slug[0] = '\0';
+				sess_title[0] = '\0';
 				sess_embedded = 0;
 				if (game_full) {
 					game_full = 0;

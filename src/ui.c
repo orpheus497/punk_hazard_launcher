@@ -167,6 +167,10 @@ struct ph_ui {
 	char   running[PH_TITLE_MAX];
 	int    running_embedded;
 
+	/* Slug that a REMOVE has been armed for; see PH_ACT_REMOVE. */
+	char   remove_armed[PH_SLUG_MAX];
+	float  remove_armed_t;
+
 	/* Grid geometry, recomputed each frame and cached for hit testing
 	 * because the mouse handlers run between frames. */
 	float  gx, gy, gw, gh;
@@ -621,8 +625,17 @@ form_submit(struct ph_ui *u)
 		    strcmp(fm->f[5].val, g->cover) != 0 &&
 		    set_cover(u, g, fm->f[5].val, fm->err, sizeof(fm->err)) != 0)
 			return 0;
-		if (fm->f[5].val[0] == '\0')
+		if (fm->f[5].val[0] == '\0') {
+			/* Clearing the field must also drop the cached
+			 * texture: draw_tile renders any non-zero cover_tex,
+			 * so the tile would keep showing the old art until
+			 * the next rescan. */
 			g->cover[0] = '\0';
+			if (g->cover_tex != 0)
+				ph_gfx_tex_free(g->cover_tex);
+			g->cover_tex = 0;
+			g->cover_tried = 0;
+		}
 
 		strlcpy(g->title,     fm->f[0].val, sizeof(g->title));
 		strlcpy(g->genre,     fm->f[1].val, sizeof(g->genre));
@@ -893,6 +906,23 @@ ph_ui_action(struct ph_ui *u, enum ph_action a)
 			ph_ui_toast(u, "nothing selected");
 			break;
 		}
+		/*
+		 * Deleting a game removes its files and cannot be undone, and
+		 * REMOVE sits next to EDIT and FAVOURITE in the options grid
+		 * where a mis-click is easy.  So the first activation only
+		 * arms it, for this game, for a few seconds.
+		 */
+		if (strcmp(u->remove_armed, g->slug) != 0 ||
+		    u->remove_armed_t <= 0.0f) {
+			strlcpy(u->remove_armed, g->slug,
+			    sizeof(u->remove_armed));
+			u->remove_armed_t = 4.0f;
+			ph_ui_toast(u, "press again to delete %s and its files",
+			    g->title);
+			break;
+		}
+		u->remove_armed[0] = '\0';
+		u->remove_armed_t = 0.0f;
 		/* app.c owns the deletion: it has to drop the cover textures
 		 * and rescan once the files are gone. */
 		u->req = PH_REQ_REMOVE;
@@ -1131,6 +1161,9 @@ ph_ui_update(struct ph_ui *u, float dt)
 		u->scroll = u->scroll_target;
 	if (u->toast_t > 0.0f)
 		u->toast_t -= dt;
+	if (u->remove_armed_t > 0.0f &&
+	    (u->remove_armed_t -= dt) <= 0.0f)
+		u->remove_armed[0] = '\0';
 	ph_sysmon_update(&u->mon, dt);
 }
 

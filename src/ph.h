@@ -59,6 +59,14 @@ size_t strlcat(char *dst, const char *src, size_t dstsize);
 #define PH_VERSION  "0.1.0"
 
 /*
+ * Desktop identity.  This must equal the basename of the installed
+ * .desktop file and the StartupWMClass inside it: X11 matches a window to
+ * its launcher entry through WM_CLASS, and Wayland through an app id that
+ * the protocol expects to be the .desktop file's name.
+ */
+#define PH_APPID    "punk_hazard"
+
+/*
  * Fixed-size records.  A launcher holds a few hundred games; chasing a
  * malloc per string would cost more in allocator traffic and cache misses
  * than the slack costs in RAM, and every field below has a natural bound.

@@ -161,16 +161,19 @@ ph_script_open(const struct ph_paths *p)
 	 */
 	lua_getglobal(s->L, "package");
 	if (lua_istable(s->L, -1)) {
-		char pat[PH_PATH_MAX * 2 + 64];
 		const char *orig;
 
 		lua_getfield(s->L, -1, "path");
 		orig = lua_isstring(s->L, -1) ? lua_tostring(s->L, -1) : "";
-		snprintf(pat, sizeof(pat), "%s/?.lua;%s/?.lua;%s",
+		/*
+		 * lua_pushfstring, not snprintf into a fixed buffer: the
+		 * existing path comes from LUA_PATH and has no bound we
+		 * control, and silently truncating it would make a module
+		 * that used to load simply stop being found.
+		 */
+		lua_pushfstring(s->L, "%s/?.lua;%s/?.lua;%s",
 		    s->luadir, p->root, orig);
-		lua_pop(s->L, 1);
-
-		lua_pushstring(s->L, pat);
+		lua_remove(s->L, -2);		/* drop the old path string */
 		lua_setfield(s->L, -2, "path");
 	}
 	lua_pop(s->L, 1);

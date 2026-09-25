@@ -121,17 +121,44 @@ say "$LUA_PC $("$PKG_CONFIG" --modversion "$LUA_PC")"
 PKG_CFLAGS=$("$PKG_CONFIG" --cflags sdl2 glesv2 egl "$LUA_PC")
 PKG_LIBS=$("$PKG_CONFIG" --libs   sdl2 glesv2 egl "$LUA_PC")
 
-# --- X11, optional -------------------------------------------------------
-# Only needed to run a game *inside* the launcher window, which is an X11
-# capability (XReparentWindow). Wayland cannot do it at all -- see
-# src/embed.h -- so its absence is a missing feature, never a build error.
-chk "for X11 (optional, for in-window game embedding)"
+# --- X11 -----------------------------------------------------------------
+# X11 is what lets a game run *inside* the launcher window
+# (XReparentWindow); Wayland cannot do it at all -- see src/embed.h.
+#
+# Whether it is optional is not ours to decide: <SDL_syswm.h> itself does
+#     #if defined(SDL_VIDEO_DRIVER_X11)
+#     #include <X11/Xlib.h>
+# so if THIS SDL was built with X11 support, anything including that header
+# needs the X11 headers to compile at all.  Ask SDL, and make X11 required
+# exactly when SDL says it is.
+chk "whether SDL was built with X11"
+cat > "$tmpd/x.c" <<'EOF'
+#include <SDL.h>
+#if !defined(SDL_VIDEO_DRIVER_X11)
+#error SDL has no X11 backend
+#endif
+int main(void) { return 0; }
+EOF
+sdl_x11=no
+if "$CC_FOUND" -c -o "$tmpd/x.o" "$tmpd/x.c" \
+    $("$PKG_CONFIG" --cflags sdl2) >/dev/null 2>&1; then
+	sdl_x11=yes
+fi
+say "$sdl_x11"
+
+chk "for X11"
 if "$PKG_CONFIG" --exists x11 2>/dev/null; then
 	say "$("$PKG_CONFIG" --modversion x11)"
 	PKG_CFLAGS="$PKG_CFLAGS $("$PKG_CONFIG" --cflags x11)"
 	PKG_LIBS="$PKG_LIBS $("$PKG_CONFIG" --libs x11)"
+elif [ "$sdl_x11" = yes ]; then
+	echo "no"
+	die "this SDL2 is built with X11, so <SDL_syswm.h> includes
+       <X11/Xlib.h> and the X11 headers are required to build at all.
+       On FreeBSD: pkg install libX11"
 else
-	say "no (games will run full-screen instead of embedded)"
+	say "no (SDL has no X11 backend either; games will run
+                                          full-screen instead of embedded)"
 fi
 
 # libm is not in every pkg-config file but stb_truetype needs sqrt/floor.

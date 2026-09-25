@@ -775,12 +775,27 @@ bolt, carrying the same scanlines and corner ticks as the launcher itself — an
 the PNGs are rasterised from it, so every size is the same drawing rather than
 nine separate ones.
 
-The entry sets `StartupWMClass=punkhazard`, and the launcher sets
-`SDL_HINT_APP_NAME` to match. Without that pairing a taskbar cannot tell that
-the running window belongs to that entry, and shows a generic icon beside a
-duplicate launcher entry. Verified with `desktop-file-validate`, and the
-resulting window really does report `("punkhazard" "punkhazard")` as its WM
-class.
+For a desktop to connect the running window to that entry, three names have to
+agree: the `.desktop` basename, its `StartupWMClass`, and the class the window
+actually reports. All three are `punk_hazard`.
+
+Getting the third one right is less obvious than it looks. SDL does **not**
+take the window class from `SDL_HINT_APP_NAME`. Its X11 backend reads the
+environment variable `SDL_VIDEO_X11_WMCLASS` and, failing that, resolves the
+running executable through `/proc`; the Wayland backend reads
+`SDL_VIDEO_WAYLAND_WMCLASS` and falls back to the X11 one. Leaning on the
+`/proc` path would be leaning on luck **on the platform this program targets**:
+FreeBSD does not mount procfs by default, so the class would fall through to
+SDL's own default and the association would quietly break. punkhazard therefore
+sets both variables explicitly before `SDL_Init`.
+
+(The `/proc` fallback is exactly why an earlier version of this README claimed
+`SDL_HINT_APP_NAME` did the job: the window *did* report the right class when
+tested on Linux — because `/proc/<pid>/exe` happened to resolve to a binary of
+that name, not because the hint had any effect.)
+
+Verified with `desktop-file-validate`, and by reading the class back off a live
+window with `xwininfo`.
 
 ---
 
@@ -800,6 +815,9 @@ class.
   glyphs are laid out left to right with kerning.
 - **One library at a time.** Switch with `PUNKHAZARD_ROOT`.
 - **In-window game embedding is X11-only**, and best-effort there. See §9.
+- **One game at a time.** While a session is running, launch, import and remove
+  are refused rather than queued; the running game is tracked by slug so that
+  sorting or rescanning cannot misattribute its playtime.
 - **An import blocks the window** while it runs. A source build can take
   minutes; the launcher says what it is doing but does not animate during it.
 - **Form fields have no cursor.** Text appends and Backspace removes, as in

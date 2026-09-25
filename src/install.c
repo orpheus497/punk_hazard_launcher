@@ -357,7 +357,7 @@ ph_install(const struct ph_paths *p, const char *src,
 	char payload[PH_PATH_MAX];
 	char gamedir[PH_PATH_MAX], gameroot[PH_PATH_MAX];
 	char slug[PH_SLUG_MAX], title[PH_TITLE_MAX];
-	int  logfd = -1, rc = -1, src_is_file;
+	int  logfd = -1, rc = -1, src_is_file, made_dir = 0;
 
 	if (o == NULL) {
 		memset(&none, 0, sizeof(none));
@@ -422,10 +422,19 @@ ph_install(const struct ph_paths *p, const char *src,
 		ph_warn("path too long for '%s'", slug);
 		return -1;
 	}
-	if (ph_mkdirp(gamedir, 0755) != 0) {
+	/*
+	 * mkdir(2), not ph_mkdirp(): mkdirp treats EEXIST as success, so two
+	 * imports racing on the same title would both "create" the same
+	 * directory, and whichever failed first would take the other's game
+	 * with it down the ph_rmtree(gamedir) cleanup path.  An exclusive
+	 * create makes the winner unambiguous, and losing means picking
+	 * another slug rather than sharing one.
+	 */
+	if (mkdir(gamedir, 0755) != 0) {
 		ph_warn("cannot create %s: %s", gamedir, strerror(errno));
 		return -1;
 	}
+	made_dir = 1;
 	logfd = open_log(gamedir);
 
 	/* --- 1. archive -> staging ------------------------------------ */
@@ -574,7 +583,8 @@ out:
 		close(logfd);
 	if (staging[0] != '\0')
 		ph_rmtree(staging);
-	if (rc != 0)
+	/* Only remove what this call created -- never another import's. */
+	if (rc != 0 && made_dir)
 		ph_rmtree(gamedir);	/* leave no half-installed entry */
 	return rc;
 }

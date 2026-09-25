@@ -121,7 +121,19 @@ main(int argc, char **argv)
 
 	game_argv[0] = argv[1];
 	game_argv[1] = NULL;
-	if ((pid = fork()) == 0) {
+	/*
+	 * Check the fork before anything can reach the cleanup path: on
+	 * failure pid is -1, and kill(-1, SIGTERM) signals every process
+	 * this user is permitted to signal -- which would end their session.
+	 */
+	if ((pid = fork()) < 0) {
+		perror("fork");
+		ph_embed_destroy(e);
+		SDL_DestroyWindow(win);
+		SDL_Quit();
+		return 1;
+	}
+	if (pid == 0) {
 		execvp(game_argv[0], game_argv);
 		_exit(127);
 	}
