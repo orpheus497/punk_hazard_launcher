@@ -1,0 +1,289 @@
+.\" punkhazard(6) -- mdoc(7), the FreeBSD manual format.
+.Dd September 25, 2026
+.Dt PUNKHAZARD 6
+.Os
+.Sh NAME
+.Nm punkhazard
+.Nd retro console-style game launcher
+.Sh SYNOPSIS
+.Nm
+.Op Fl v
+.Op Cm ui
+.Nm
+.Op Fl v
+.Cm add Ar path
+.Op Fl -title Ar name
+.Op Fl -exec Ar path
+.Op Fl -args Ar string
+.Op Fl -genre Ar name
+.Op Fl -developer Ar name
+.Op Fl -year Ar year
+.Op Fl -desc Ar text
+.Op Fl -cover Ar file
+.Op Fl -no-build
+.Op Fl -link
+.Nm
+.Cm ls
+.Nm
+.Cm info | run | rm Ar slug
+.Nm
+.Cm paths | version | help
+.Sh DESCRIPTION
+.Nm
+is a full-screen launcher for games kept in a local library.
+It presents a grid of box art with a details and options panel, and a
+system monitor, and is driven by keyboard, mouse or gamepad.
+It runs on X11 and on Wayland from the same binary, choosing between them
+at run time.
+.Pp
+With no command,
+.Nm
+starts the graphical launcher.
+Every operation it performs is also available from the shell, so a library
+can be built and inspected by scripts.
+.Pp
+.Nm
+is the parent process of the game it launches: it waits for the game to
+exit, then records the elapsed time.
+It makes no network connections.
+.Ss Commands
+.Bl -tag -width "add path"
+.It Cm ui
+Run the graphical launcher.
+This is the default.
+.It Cm add Ar path
+Import a game.
+.Ar path
+may be an executable, a directory, a source tree, or an archive
+.Pq tar, gz, bz2, xz, zst, zip .
+An archive is extracted first; a source tree is built with the first
+matching recipe from
+.Pa install.lua ;
+the resulting tree is then scanned for an entry point.
+The chosen slug is printed on standard output.
+.It Cm ls
+List the library on standard output, one game per line, as tab-separated
+fields: slug, title, genre, year, playtime, launch count, favourite.
+.It Cm info Ar slug
+Print one game's record as tab-separated key/value lines.
+.It Cm run Ar slug
+Launch a game without starting the graphical launcher.
+The game's own exit status is passed through.
+.It Cm rm Ar slug
+Remove a game and everything under its directory.
+.It Cm paths
+Print the directories in use.
+.It Cm version
+Print the version.
+.It Cm help
+Print a usage summary.
+.El
+.Ss Options
+.Bl -tag -width "-developer name"
+.It Fl v
+Verbose: report each step on standard error.
+Must precede the command.
+.It Fl -title Ar name
+Display name.
+Defaults to the file or directory name.
+The slug is derived from it.
+.It Fl -exec Ar path
+Entry point, relative to the imported tree.
+Overrides the automatic scan.
+.It Fl -args Ar string
+Arguments passed to the game.
+Quoting is understood; no shell is involved.
+.It Fl -genre Ar name , Fl -developer Ar name , Fl -year Ar year
+Metadata, shown in the launcher and searched by the filter.
+.It Fl -desc Ar text
+One-line description.
+.It Fl -cover Ar file
+Box art
+.Pq png or jpeg ,
+copied into the game's directory.
+.It Fl -no-build
+Import a source tree without running a build recipe.
+.It Fl -link
+Register the game where it is instead of copying it.
+.Va exec
+and
+.Va workdir
+are then absolute, and nothing is duplicated.
+.El
+.Ss Keys
+.Bl -tag -width "PageUp, PageDown" -compact
+.It Ic arrows , h j k l
+Move around the grid.
+.It Ic Tab
+Move focus between the grid and the options panel.
+.It Ic A
+Add a game: a form for the path, title, metadata and box art.
+.It Ic E
+Edit the selected game, including replacing its cover art.
+.It Ic Del
+Remove the selected game and its files.
+.It Ic PageUp , PageDown
+Move a screenful.
+.It Ic Home , End
+First or last entry.
+.It Ic Return , Space
+Launch, or activate the highlighted option.
+.It Ic /
+Filter the library.
+.It Ic B , *
+Toggle favourite.
+Favourites sort first.
+.It Ic S
+Cycle the sort key.
+.It Ic R
+Rescan the library from disk.
+.It Ic T
+Cycle theme.
+.It Ic C
+Toggle the CRT post-process.
+.It Ic F11 , F
+Toggle fullscreen.
+While a game is running inside the launcher window, this instead gives the
+game the whole screen and hides the launcher.
+.It Ic F1 , ?
+Key help.
+.It Ic Esc
+Close an overlay, or clear the filter.
+.It Ic Q
+Quit.
+.El
+.Pp
+On a gamepad, the d-pad or left stick moves,
+.Ic A
+launches,
+.Ic B
+backs out,
+.Ic X
+focuses the options panel,
+.Ic Y
+favourites, the shoulder buttons page, and
+.Ic Back
+cycles the sort key.
+In a form, the arrow keys move between fields,
+.Ic Enter
+advances,
+.Ic F2
+saves and
+.Ic Esc
+cancels.
+.Pp
+All bindings are defined in
+.Pa keys.lua
+and may be changed without recompiling.
+.Ss Running a game
+On X11 a launched game is reparented into the launcher's window with
+.Xr XReparentWindow 3
+and sized to the grid area, so the panels stay visible around it.
+.Pp
+Wayland does not permit this: its object identifiers are scoped to one
+client connection, so a client cannot reference \(em let alone adopt \(em a
+surface belonging to another process.
+Under Wayland, and wherever a game's window cannot be identified,
+.Nm
+hides itself and the game takes the screen instead.
+Set
+.Va embed
+to false in
+.Pa config.lua
+to always use that path.
+.Sh ENVIRONMENT
+.Bl -tag -width PUNKHAZARD_ROOT
+.It Ev PUNKHAZARD_ROOT
+The library directory.
+If unset,
+.Ev XDG_DATA_HOME Ns Pa /punkhazard
+is used, and failing that
+.Pa ~/.local/share/punkhazard .
+.It Ev PUNKHAZARD_LUA
+Directory holding the Lua policy files.
+Defaults to the installed
+.Pa share/punkhazard/lua .
+Set it to run from a build tree.
+.El
+.Sh FILES
+.Bl -tag -width "<root>/games/<slug>/manifest" -compact
+.It Pa <root>/config.lua
+User settings, merged over the shipped defaults.
+.It Pa <root>/games/<slug>/manifest
+One game's record: text,
+.Ql key = value ,
+one per line.
+.It Pa <root>/games/<slug>/root/
+The game's own files.
+.It Pa <root>/games/<slug>/cover.png
+Box art.
+.It Pa <root>/games/<slug>/install.log
+Transcript of the import and build.
+.It Pa ~/.local/share/punkhazard
+Default library root.
+.It Pa PREFIX/share/applications/punk_hazard.desktop
+Desktop entry.
+.It Pa PREFIX/share/icons/hicolor/*/apps/punkhazard.*
+Application icon, scalable and rasterised.
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Pp
+.Cm run
+instead exits with the status of the game it launched.
+A usage error exits 2.
+.Sh EXAMPLES
+Import a prebuilt binary with metadata:
+.Bd -literal -offset indent
+punkhazard add ~/games/quake/quake --title Quake \e
+    --genre FPS --year 1996 --developer "id Software"
+.Ed
+.Pp
+Import and build a source tree:
+.Bd -literal -offset indent
+punkhazard add ~/src/openttd --title OpenTTD
+.Ed
+.Pp
+Register something already installed, without copying it:
+.Bd -literal -offset indent
+punkhazard add /usr/local/bin/nethack --link --title NetHack
+.Ed
+.Pp
+The five games with the most launches:
+.Bd -literal -offset indent
+punkhazard ls | sort -t"$(printf '\et')" -k6 -rn | head -5 | cut -f2
+.Ed
+.Pp
+Everything never actually played:
+.Bd -literal -offset indent
+punkhazard ls | awk -F'\et' '$5 == "never" { print $2 }'
+.Ed
+.Sh SEE ALSO
+.Xr make 1 ,
+.Xr tar 1 ,
+.Xr hier 7 ,
+.Xr sysctl 8
+.Pp
+.Xr XReparentWindow 3
+for the mechanism behind running a game inside the launcher window.
+.Sh STANDARDS
+The library root follows the XDG Base Directory Specification when
+.Ev XDG_DATA_HOME
+is set.
+The default install prefix follows
+.Xr hier 7 .
+.Sh AUTHORS
+.An orpheus497
+.Sh CAVEATS
+The entry-point scanner is a heuristic.
+When it chooses the wrong file, pass
+.Fl -exec .
+.Pp
+Cover art is decoded by a vendored copy of
+.Nm stb_image ,
+which is not a hardened decoder.
+It parses whatever image files are present in the library directory.
+.Pp
+Importing a source tree from the graphical launcher blocks the window
+until the build finishes.
+The launcher says what it is doing, but does not animate while it waits.

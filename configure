@@ -1,0 +1,197 @@
+#!/bin/sh
+#
+# punkhazard -- configure
+#
+# A hand-written POSIX shell script.  Not autoconf, not cmake, not meson.
+#
+# Its entire job is to answer four questions that cannot be answered from
+# inside a makefile portably, and then write the answers into Makefile:
+#
+#   1. Which C compiler?
+#   2. Where does pkg-config say SDL2 / GLESv2 / EGL live?
+#   3. What is the Lua 5.4 pkg-config module called on THIS system?
+#      (FreeBSD's lang/lua54 installs "lua-5.4.pc"; Debian installs
+#      "lua5.4.pc"; others ship "lua54.pc".  There is no single right name.)
+#   4. Where should "make install" put things?
+#
+# Why generate Makefile instead of a config.mk include?
+# -----------------------------------------------------
+# FreeBSD's make(1) is bmake and spells file inclusion `.include "file"`.
+# GNU make spells it `include file` and rejects bmake's form.  There is no
+# spelling that both accept in all versions.  By substituting the probe
+# results directly into Makefile we sidestep the dialect problem entirely:
+# the generated Makefile uses only syntax that bmake and GNU make agree on.
+#
+# Run ./configure --help for options.
+
+set -u
+
+PREFIX=/usr/local          # hier(7): "local executables, libraries, etc"
+CC_IN=${CC:-}
+PKG_CONFIG=${PKG_CONFIG:-pkg-config}
+BUILD=release
+LUA_PC=
+EXTRA_CFLAGS=${CFLAGS:-}
+EXTRA_LDFLAGS=${LDFLAGS:-}
+
+die() { printf '%s: %s\n' "configure" "$*" >&2; exit 1; }
+say() { printf '%s\n' "$*"; }
+chk() { printf '%-42s' "checking $1 ..."; }
+
+usage() {
+	cat <<'USAGE'
+usage: ./configure [options]
+
+  --prefix=DIR      install prefix            (default: /usr/local)
+  --with-lua=NAME   pkg-config module for Lua (default: autodetect)
+  --debug           -O0 -g3, assertions on, no -DNDEBUG
+  --help            this message
+
+Environment: CC, CFLAGS, LDFLAGS, PKG_CONFIG are honoured.
+USAGE
+	exit 0
+}
+
+for arg in "$@"; do
+	case $arg in
+	--prefix=*)   PREFIX=${arg#*=} ;;
+	--with-lua=*) LUA_PC=${arg#*=} ;;
+	--debug)      BUILD=debug ;;
+	--help|-h)    usage ;;
+	*)            die "unknown option: $arg (try --help)" ;;
+	esac
+done
+
+say "punkhazard configure"
+say "--------------------"
+
+# --- 1. C compiler ---------------------------------------------------------
+chk "for a C compiler"
+CC_FOUND=
+for c in ${CC_IN} cc clang gcc; do
+	[ -n "$c" ] || continue
+	if command -v "$c" >/dev/null 2>&1; then CC_FOUND=$c; break; fi
+done
+[ -n "$CC_FOUND" ] || { echo "no"; die "no C compiler found (set CC=)"; }
+say "$CC_FOUND"
+
+# Confirm it actually compiles and links a trivial C11 program.
+chk "whether $CC_FOUND works"
+tmpd=$(mktemp -d 2>/dev/null) || die "mktemp failed"
+trap 'rm -rf "$tmpd"' EXIT INT HUP TERM
+cat > "$tmpd/t.c" <<'EOF'
+int main(void) { return 0; }
+EOF
+if "$CC_FOUND" -std=c11 -o "$tmpd/t" "$tmpd/t.c" >/dev/null 2>&1; then
+	say "yes"
+else
+	echo "no"; die "$CC_FOUND cannot build a C11 program"
+fi
+
+# --- 2. pkg-config ---------------------------------------------------------
+chk "for pkg-config"
+command -v "$PKG_CONFIG" >/dev/null 2>&1 || { echo "no"; die "pkg-config not found"; }
+say "$PKG_CONFIG"
+
+need_mod() {   # need_mod <pc-name> <human name> <freebsd port>
+	chk "for $2"
+	if "$PKG_CONFIG" --exists "$1" 2>/dev/null; then
+		say "$("$PKG_CONFIG" --modversion "$1")"
+	else
+		echo "no"
+		die "$2 not found. On FreeBSD: pkg install $3"
+	fi
+}
+need_mod sdl2   "SDL2"           sdl2
+need_mod glesv2 "OpenGL ES 2.0"  mesa-libs
+need_mod egl    "EGL"            mesa-libs
+
+# --- 3. Lua ----------------------------------------------------------------
+# Probe the spellings actually used in the wild, FreeBSD's first.
+chk "for Lua 5.4"
+if [ -z "$LUA_PC" ]; then
+	for m in lua-5.4 lua5.4 lua54 lua-5.3 lua5.3 lua53 lua; do
+		if "$PKG_CONFIG" --exists "$m" 2>/dev/null; then LUA_PC=$m; break; fi
+	done
+fi
+[ -n "$LUA_PC" ] || { echo "no"; die "Lua not found. On FreeBSD: pkg install lua54"; }
+"$PKG_CONFIG" --exists "$LUA_PC" 2>/dev/null || die "no such pkg-config module: $LUA_PC"
+say "$LUA_PC $("$PKG_CONFIG" --modversion "$LUA_PC")"
+
+PKG_CFLAGS=$("$PKG_CONFIG" --cflags sdl2 glesv2 egl "$LUA_PC")
+PKG_LIBS=$("$PKG_CONFIG" --libs   sdl2 glesv2 egl "$LUA_PC")
+
+# --- X11 -----------------------------------------------------------------
+# X11 is what lets a game run *inside* the launcher window
+# (XReparentWindow); Wayland cannot do it at all -- see src/embed.h.
+#
+# Whether it is optional is not ours to decide: <SDL_syswm.h> itself does
+#     #if defined(SDL_VIDEO_DRIVER_X11)
+#     #include <X11/Xlib.h>
+# so if THIS SDL was built with X11 support, anything including that header
+# needs the X11 headers to compile at all.  Ask SDL, and make X11 required
+# exactly when SDL says it is.
+chk "whether SDL was built with X11"
+cat > "$tmpd/x.c" <<'EOF'
+#include <SDL.h>
+#if !defined(SDL_VIDEO_DRIVER_X11)
+#error SDL has no X11 backend
+#endif
+int main(void) { return 0; }
+EOF
+sdl_x11=no
+if "$CC_FOUND" -c -o "$tmpd/x.o" "$tmpd/x.c" \
+    $("$PKG_CONFIG" --cflags sdl2) >/dev/null 2>&1; then
+	sdl_x11=yes
+fi
+say "$sdl_x11"
+
+chk "for X11"
+if "$PKG_CONFIG" --exists x11 2>/dev/null; then
+	say "$("$PKG_CONFIG" --modversion x11)"
+	PKG_CFLAGS="$PKG_CFLAGS $("$PKG_CONFIG" --cflags x11)"
+	PKG_LIBS="$PKG_LIBS $("$PKG_CONFIG" --libs x11)"
+elif [ "$sdl_x11" = yes ]; then
+	echo "no"
+	die "this SDL2 is built with X11, so <SDL_syswm.h> includes
+       <X11/Xlib.h> and the X11 headers are required to build at all.
+       On FreeBSD: pkg install libX11"
+else
+	say "no (SDL has no X11 backend either; games will run
+                                          full-screen instead of embedded)"
+fi
+
+# libm is not in every pkg-config file but stb_truetype needs sqrt/floor.
+PKG_LIBS="$PKG_LIBS -lm"
+
+# --- 4. build flavour ------------------------------------------------------
+WARN='-Wall -Wextra -Wshadow -Wpointer-arith -Wcast-qual -Wstrict-prototypes -Wmissing-prototypes -Wno-unused-parameter'
+if [ "$BUILD" = debug ]; then
+	OPT='-O0 -g3 -fno-omit-frame-pointer'
+else
+	OPT='-O2 -DNDEBUG'
+fi
+
+chk "build type"; say "$BUILD"
+chk "install prefix"; say "$PREFIX"
+
+# --- emit ------------------------------------------------------------------
+[ -f Makefile.in ] || die "Makefile.in missing (run from the source root)"
+
+# Escape for sed: '|' is our delimiter, and '&' is special in replacements.
+esc() { printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'; }
+
+sed \
+ -e "s|@CC@|$(esc "$CC_FOUND")|g" \
+ -e "s|@PREFIX@|$(esc "$PREFIX")|g" \
+ -e "s|@OPT@|$(esc "$OPT")|g" \
+ -e "s|@WARN@|$(esc "$WARN")|g" \
+ -e "s|@PKG_CFLAGS@|$(esc "$PKG_CFLAGS")|g" \
+ -e "s|@PKG_LIBS@|$(esc "$PKG_LIBS")|g" \
+ -e "s|@EXTRA_CFLAGS@|$(esc "$EXTRA_CFLAGS")|g" \
+ -e "s|@EXTRA_LDFLAGS@|$(esc "$EXTRA_LDFLAGS")|g" \
+ Makefile.in > Makefile.tmp || die "sed failed"
+mv Makefile.tmp Makefile || die "could not write Makefile"
+
+say ""
+say "wrote Makefile.  now run:  make"

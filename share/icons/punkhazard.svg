@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  punkhazard application icon.
+
+  A hazard triangle, because the name is the mark: toxic green on near
+  black with a magenta bolt. Drawn from primitives at a 256 unit grid so
+  it stays legible when a launcher renders it at 16px: heavy strokes, one
+  silhouette, no gradients that collapse to mud at small sizes.
+
+  The scanline band and the corner ticks are the CRT idiom the launcher
+  itself uses, carried onto the icon so they read as the same product.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256"
+     viewBox="0 0 256 256" role="img" aria-label="punkhazard">
+  <defs>
+    <clipPath id="body">
+      <rect x="8" y="8" width="240" height="240" rx="46" ry="46"/>
+    </clipPath>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0"   stop-color="#141b22"/>
+      <stop offset="1"   stop-color="#07090b"/>
+    </linearGradient>
+  </defs>
+
+  <!-- chassis -->
+  <rect x="8" y="8" width="240" height="240" rx="46" ry="46" fill="url(#bg)"/>
+
+  <!-- scanlines, clipped to the chassis -->
+  <g clip-path="url(#body)" opacity="0.30">
+    <g fill="#1affaa">
+      <rect x="8" y="16"  width="240" height="2"/><rect x="8" y="32"  width="240" height="2"/>
+      <rect x="8" y="48"  width="240" height="2"/><rect x="8" y="64"  width="240" height="2"/>
+      <rect x="8" y="80"  width="240" height="2"/><rect x="8" y="96"  width="240" height="2"/>
+      <rect x="8" y="112" width="240" height="2"/><rect x="8" y="128" width="240" height="2"/>
+      <rect x="8" y="144" width="240" height="2"/><rect x="8" y="160" width="240" height="2"/>
+      <rect x="8" y="176" width="240" height="2"/><rect x="8" y="192" width="240" height="2"/>
+      <rect x="8" y="208" width="240" height="2"/><rect x="8" y="224" width="240" height="2"/>
+      <rect x="8" y="240" width="240" height="2"/>
+    </g>
+  </g>
+
+  <!-- hazard triangle -->
+  <path d="M128 40 L226 210 L30 210 Z"
+        fill="none" stroke="#1affaa" stroke-width="17"
+        stroke-linejoin="round"/>
+  <path d="M128 40 L226 210 L30 210 Z"
+        fill="#1affaa" opacity="0.10"/>
+
+  <!-- bolt -->
+  <path d="M141 92 L104 150 L126 150 L115 192 L154 130 L131 130 Z"
+        fill="#ff2e88"/>
+
+  <!-- corner ticks -->
+  <g stroke="#1affaa" stroke-width="7" stroke-linecap="round" opacity="0.85">
+    <path d="M34 60 L34 40 L54 40"/>
+    <path d="M222 60 L222 40 L202 40"/>
+    <path d="M34 196 L34 216 L54 216"/>
+    <path d="M222 196 L222 216 L202 216"/>
+  </g>
+</svg>

@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=punkhazard
+GenericName=Game Launcher
+Comment=Retro console-style game launcher
+Exec=punkhazard
+TryExec=punkhazard
+Icon=punkhazard
+Terminal=false
+Categories=Game;
+Keywords=game;games;launcher;library;retro;console;arcade;
+StartupNotify=false
+StartupWMClass=punk_hazard
