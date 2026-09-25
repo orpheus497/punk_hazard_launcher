@@ -1,0 +1,147 @@
+# punkhazard -- Makefile.in
+#
+# ./configure substitutes the @TOKENS@ and writes Makefile.
+#
+# PORTABILITY CONTRACT: this file uses only make syntax that FreeBSD's
+# make(1) (bmake) and GNU make both accept:
+#
+#   * plain  VAR = value  and  VAR ?= value  assignment
+#   * $(VAR) expansion -- never ${VAR:S//} (bmake-only) or $(patsubst)
+#     (GNU-only)
+#   * suffix/inference rules (.c.o) -- never GNU '%' pattern rules
+#   * $< and $@ inside inference rules only, which is what POSIX guarantees
+#   * no $(shell ...) and no != -- all probing happened in ./configure
+#
+# The result is that `make` works unmodified on FreeBSD, and `gmake` works
+# for development on other systems.
+
+CC        = @CC@
+PREFIX    = @PREFIX@
+BINDIR    = $(PREFIX)/bin
+DATADIR   = $(PREFIX)/share/punkhazard
+MANDIR    = $(PREFIX)/share/man/man6
+
+INCS      = -Isrc -Ithird_party/stb
+DEFS      = -DPH_DATADIR=\"$(DATADIR)\"
+CFLAGS    = -std=c11 @OPT@ @WARN@ $(INCS) $(DEFS) @PKG_CFLAGS@ @EXTRA_CFLAGS@
+LDFLAGS   = @EXTRA_LDFLAGS@
+LIBS      = @PKG_LIBS@
+
+INSTALL     = install
+INSTALL_BIN = $(INSTALL) -m 0755
+INSTALL_LIB = $(INSTALL) -m 0644
+INSTALL_DIR = $(INSTALL) -d -m 0755
+
+PROG   = punkhazard
+BIN2C  = tools/bin2c
+
+# Hand-written translation units.
+OBJS = \
+	src/util.o \
+	src/sysmon.o \
+	src/catalog.o \
+	src/install.o \
+	src/launch.o \
+	src/script.o \
+	src/gfx.o \
+	src/text.o \
+	src/input.o \
+	src/ui.o \
+	src/app.o \
+	src/main.o \
+	src/stb.o
+
+# Generated translation units: the typeface, baked into .rodata.
+GENOBJS = \
+	gen/font_regular.o \
+	gen/font_bold.o
+
+HDRS = src/ph.h src/gfx.h src/text.h src/ui.h src/script.h src/input.h src/sysmon.h
+
+.SUFFIXES:
+.SUFFIXES: .c .o
+
+.c.o:
+	$(CC) $(CFLAGS) -c $< -o $@
+
+all: $(PROG)
+
+$(PROG): $(OBJS) $(GENOBJS)
+	$(CC) $(LDFLAGS) -o $(PROG) $(OBJS) $(GENOBJS) $(LIBS)
+
+# --- every object depends on the shared headers ---------------------------
+# Crude but exactly correct, and it needs no dependency generator, no
+# .depend file and no make-specific include directive.
+$(OBJS): $(HDRS)
+
+# --- the font bake --------------------------------------------------------
+# tools/bin2c turns the OpenType file into a C array.  These rules fire only
+# when the font itself changes, so the ~5s compile of a 2MB array is paid
+# once, not on every build.
+$(BIN2C): tools/bin2c.c
+	$(CC) -O2 -o $(BIN2C) tools/bin2c.c
+
+gen/font_regular.c: $(BIN2C) third_party/fonts/HurmitNerdFontMono-Regular.otf
+	mkdir -p gen
+	$(BIN2C) ph_font_regular \
+	    third_party/fonts/HurmitNerdFontMono-Regular.otf \
+	    gen/font_regular.c
+
+gen/font_bold.c: $(BIN2C) third_party/fonts/HurmitNerdFontMono-Bold.otf
+	mkdir -p gen
+	$(BIN2C) ph_font_bold \
+	    third_party/fonts/HurmitNerdFontMono-Bold.otf \
+	    gen/font_bold.c
+
+gen/font_regular.o: gen/font_regular.c
+gen/font_bold.o: gen/font_bold.c
+
+# stb_truetype/stb_image are third-party single-header libraries.  They are
+# compiled in their own translation unit with warnings relaxed so that our
+# own -Wall -Wextra stays meaningful instead of drowning in vendor noise.
+src/stb.o: src/stb.c third_party/stb/stb_truetype.h third_party/stb/stb_image.h
+	$(CC) -std=c11 @OPT@ -w $(INCS) @PKG_CFLAGS@ @EXTRA_CFLAGS@ -c src/stb.c -o src/stb.o
+
+# --- test harness ---------------------------------------------------------
+# Renders the real UI to a PNG through a headless EGL pbuffer.  Not built
+# by `all` and never installed: it exists so the renderer can be checked
+# without a display server.
+SHOTOBJS = \
+	src/util.o src/sysmon.o src/catalog.o src/install.o src/launch.o src/script.o \
+	src/gfx.o src/text.o src/ui.o src/stb.o $(GENOBJS)
+
+shot: tools/phshot
+tools/phshot: tools/phshot.c $(SHOTOBJS) $(HDRS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o tools/phshot tools/phshot.c \
+	    $(SHOTOBJS) $(LIBS)
+
+# --- install / uninstall --------------------------------------------------
+install: $(PROG)
+	$(INSTALL_DIR) $(DESTDIR)$(BINDIR)
+	$(INSTALL_DIR) $(DESTDIR)$(DATADIR)/lua
+	$(INSTALL_DIR) $(DESTDIR)$(MANDIR)
+	$(INSTALL_BIN) $(PROG) $(DESTDIR)$(BINDIR)/$(PROG)
+	$(INSTALL_LIB) lua/config.lua   $(DESTDIR)$(DATADIR)/lua/config.lua
+	$(INSTALL_LIB) lua/theme.lua    $(DESTDIR)$(DATADIR)/lua/theme.lua
+	$(INSTALL_LIB) lua/layout.lua   $(DESTDIR)$(DATADIR)/lua/layout.lua
+	$(INSTALL_LIB) lua/keys.lua     $(DESTDIR)$(DATADIR)/lua/keys.lua
+	$(INSTALL_LIB) lua/install.lua  $(DESTDIR)$(DATADIR)/lua/install.lua
+	$(INSTALL_LIB) man/punkhazard.6 $(DESTDIR)$(MANDIR)/punkhazard.6
+
+uninstall:
+	rm -f $(DESTDIR)$(BINDIR)/$(PROG)
+	rm -f $(DESTDIR)$(MANDIR)/punkhazard.6
+	rm -rf $(DESTDIR)$(DATADIR)
+
+# --- housekeeping ---------------------------------------------------------
+clean:
+	rm -f $(PROG) $(OBJS) $(GENOBJS) $(BIN2C) tools/phshot
+
+distclean: clean
+	rm -rf gen Makefile
+
+# Convenience: run straight out of the build tree, reading lua/ from source.
+run: $(PROG)
+	PUNKHAZARD_LUA=lua ./$(PROG)
+
+.PHONY: all install uninstall clean distclean run shot
