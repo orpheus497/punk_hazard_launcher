@@ -208,10 +208,22 @@ approach(float cur, float target, float k, float dt)
 	return cur + (target - cur) * (1.0f - expf(-k * dt));
 }
 
+/*
+ * The selected game, or NULL.
+ *
+ * The view holds indices into the library, so it is only meaningful while
+ * the library it was built from is still there.  ph_lib_scan() empties the
+ * library before it can fail, which leaves the view naming records that no
+ * longer exist -- and ph_ui_refresh(), the call that repairs that, reads
+ * the selection first.  Bounding the mapped index against the library too
+ * is what lets the repair run on a view that has already gone stale.
+ */
 static struct ph_game *
 sel_game(struct ph_ui *u)
 {
 	if (u->nview == 0 || u->sel < 0 || (size_t)u->sel >= u->nview)
+		return NULL;
+	if (u->view[u->sel] >= u->lib->n)
 		return NULL;
 	return &u->lib->v[u->view[u->sel]];
 }

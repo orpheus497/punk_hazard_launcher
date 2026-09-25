@@ -332,20 +332,41 @@ run_recipe(const char *dir, struct ph_recipe *r, int logfd)
  * atomic against a concurrent import, so it is the step that allocates:
  * success means the name is ours, EEXIST means somebody else holds it and
  * the next name is tried.  Any other error is a real failure.
+ *
+ * `slugsize` must leave room for a "-N" suffix; PH_SLUG_MAX does.
  * ------------------------------------------------------------------ */
 static int
 claim_slug(const struct ph_paths *p, const char *want, char *slug,
     size_t slugsize, char *dir, size_t dirsize)
 {
-	int n;
+	char   suffix[8];
+	size_t wantlen, stem;
+	int    n, suflen;
+
+	if ((wantlen = strlen(want)) >= slugsize)
+		return -1;
 
 	for (n = 1; n < 1000; n++) {
 		if (n == 1) {
-			if (strlcpy(slug, want, slugsize) >= slugsize)
-				return -1;
-		} else if ((size_t)snprintf(slug, slugsize, "%s-%d", want, n)
-		    >= slugsize) {
-			return -1;
+			memcpy(slug, want, wantlen + 1);
+		} else {
+			/*
+			 * The suffix has to fit.  A slug that already fills
+			 * the buffer leaves no room for one, so shorten the
+			 * stem rather than give up: a title long enough to
+			 * reach PH_SLUG_MAX is exactly the case where a
+			 * second import must still get a directory.  Trailing
+			 * dashes are trimmed off the cut so the result keeps
+			 * the shape ph_slug() produces.
+			 */
+			suflen = snprintf(suffix, sizeof(suffix), "-%d", n);
+			stem = slugsize - 1 - (size_t)suflen;
+			if (stem > wantlen)
+				stem = wantlen;
+			while (stem > 0 && want[stem - 1] == '-')
+				stem--;
+			memcpy(slug, want, stem);
+			memcpy(slug + stem, suffix, (size_t)suflen + 1);
 		}
 		if (ph_join(dir, dirsize, p->games, slug) != 0)
 			return -1;

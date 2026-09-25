@@ -438,18 +438,28 @@ ph_app_run(const struct ph_paths *p)
 				    &drawable_h);
 				ph_gfx_resize(gfx, drawable_w, drawable_h);
 				break;
-			case PH_REQ_RELOAD:
+			case PH_REQ_RELOAD: {
+				int ok;
+
 				/* The GL texture names live in the records
 				 * ph_lib_scan is about to discard. */
 				ph_ui_release_covers(ui);
-				if (ph_lib_scan(&lib, p) == 0) {
-					ph_ui_refresh(ui);
+				/*
+				 * Refresh on BOTH paths.  ph_lib_scan frees
+				 * the records before it can fail, so on the
+				 * failure path the library is empty too --
+				 * leaving the old view in place would have
+				 * the next frame index records that are gone.
+				 */
+				ok = ph_lib_scan(&lib, p) == 0;
+				ph_ui_refresh(ui);
+				if (ok)
 					ph_ui_toast(ui, "rescanned: %zu games",
 					    lib.n);
-				} else {
+				else
 					ph_ui_toast(ui, "rescan failed");
-				}
 				break;
+			}
 			case PH_REQ_LAUNCH:
 				if (target == NULL)
 					break;

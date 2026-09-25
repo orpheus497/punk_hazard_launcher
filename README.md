@@ -732,6 +732,22 @@ enough. It is not installed by `make install`.
 This is not decoration. It is how the `mediump` shader bug described below was
 found, and every screenshot in this README was produced by it.
 
+It also reproduces failures that only a bad day produces. `--scan-fail PATH`
+points the library at something that is not a directory, so `ph_lib_scan()`
+fails the way it would on an unreadable `games/` — and because that function
+frees the records before it can fail, it leaves the UI holding a view of a
+library that is gone:
+
+```sh
+./tools/phshot --scan-fail /etc/hostname --select 2                  # crashes
+./tools/phshot --scan-fail /etc/hostname --select 2 --scan-refresh   # survives
+```
+
+`--scan-refresh` selects the repaired branch, the one `app.c` now takes on
+both outcomes of a rescan. Under `-fsanitize=address` the first of those two
+lines faults in `draw_tile`; that is the defect, made to happen on demand
+rather than argued about.
+
 The other risky thing punkhazard does — reaching into another client's window
 — has its own harness, because "it silently did nothing" and "it worked" look
 identical from the outside:

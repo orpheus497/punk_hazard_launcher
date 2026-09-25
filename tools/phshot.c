@@ -138,8 +138,8 @@ main(int argc, char **argv)
 	const char *out = "shot.png", *want_theme = NULL, *search = NULL;
 	int w = 1600, h = 900, crt = -1, select_n = 0, help = 0, tab = 0;
 	int opt_n = 0, sort_n = 0, field_n = 0, rm_n = 0, i, f, pw, ph_h;
-	const char *form = NULL, *typed = NULL;
-	int submit = 0;
+	const char *form = NULL, *typed = NULL, *scan_fail = NULL;
+	int submit = 0, scan_refresh = 0;
 
 	for (i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) out = argv[++i];
@@ -158,6 +158,9 @@ main(int argc, char **argv)
 		else if (strcmp(argv[i], "--type") == 0 && i + 1 < argc) typed = argv[++i];
 		else if (strcmp(argv[i], "--sort") == 0 && i + 1 < argc) sort_n = atoi(argv[++i]);
 		else if (strcmp(argv[i], "--option") == 0 && i + 1 < argc) opt_n = atoi(argv[++i]);
+		else if (strcmp(argv[i], "--scan-fail") == 0 && i + 1 < argc)
+			scan_fail = argv[++i];
+		else if (strcmp(argv[i], "--scan-refresh") == 0) scan_refresh = 1;
 		else if (strcmp(argv[i], "--no-crt") == 0) crt = 0;
 		else if (strcmp(argv[i], "--crt") == 0) crt = 1;
 		else if (strcmp(argv[i], "-v") == 0) ph_verbose_set(1);
@@ -165,7 +168,8 @@ main(int argc, char **argv)
 			fprintf(stderr, "usage: phshot [-o out.png] [-w W] [-h H] "
 			    "[-t theme] [--search TEXT] [--select N] "
 			    "[--tab] [--option N] "
-			    "[--help-overlay] [--crt|--no-crt] [-v]\n");
+			    "[--help-overlay] [--scan-fail PATH] "
+			    "[--scan-refresh] [--crt|--no-crt] [-v]\n");
 			return 2;
 		}
 	}
@@ -232,6 +236,28 @@ main(int argc, char **argv)
 	}
 	if (help)
 		ph_ui_action(ui, PH_ACT_HELP);
+	if (scan_fail != NULL) {
+		/*
+		 * Reproduce app.c's rescan-failure path.  --scan-fail names
+		 * a path that is NOT a directory, so opendir(3) in
+		 * ph_lib_scan fails with ENOTDIR -- but only after the
+		 * library has already been freed, which leaves this UI's
+		 * view naming records that are gone.  --scan-refresh selects
+		 * the repaired branch (refresh, then toast); without it this
+		 * is the old branch, which only toasted.
+		 */
+		int r;
+
+		strlcpy(paths.games, scan_fail, sizeof(paths.games));
+		ph_ui_release_covers(ui);
+		r = ph_lib_scan(&lib, &paths);
+		printf("scan-fail: ph_lib_scan -> %d, lib.n = %zu, "
+		    "refresh = %s\n", r, lib.n, scan_refresh ? "yes" : "no");
+		if (scan_refresh)
+			ph_ui_refresh(ui);
+		ph_ui_toast(ui, "rescan failed");
+		ph_ui_action(ui, PH_ACT_LAUNCH);
+	}
 	if (form != NULL) {
 		ph_ui_action(ui, strcmp(form, "edit") == 0 ? PH_ACT_EDIT
 		                                           : PH_ACT_ADD);
