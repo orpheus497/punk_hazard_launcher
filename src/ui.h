@@ -43,6 +43,13 @@ void ph_ui_destroy(struct ph_ui *u);
 /* The library changed underneath us (rescan, install, delete). */
 void ph_ui_refresh(struct ph_ui *u);
 
+/*
+ * Free every loaded cover texture.  MUST be called before the library array
+ * is freed or re-scanned: the GL texture name lives in the ph_game record,
+ * so discarding the record without this leaks the texture.
+ */
+void ph_ui_release_covers(struct ph_ui *u);
+
 void ph_ui_action(struct ph_ui *u, enum ph_action a);
 void ph_ui_text(struct ph_ui *u, const char *utf8);   /* search typing */
 void ph_ui_backspace(struct ph_ui *u);

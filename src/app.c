@@ -127,10 +127,21 @@ run_game(SDL_Window *win, struct ph_ui *ui, struct ph_config *cfg,
 	SDL_RaiseWindow(win);
 	if (cfg->fullscreen)
 		SDL_SetWindowFullscreen(win, SDL_WINDOW_FULLSCREEN_DESKTOP);
-	/* Drain input that arrived while the game had focus, so a keypress
-	 * meant for the game does not land in the launcher. */
+	/*
+	 * Drain input that arrived while the game had focus, so a keypress
+	 * meant for the game does not land in the launcher.
+	 *
+	 * The ranges are deliberately narrow.  A single flush from
+	 * SDL_KEYDOWN to SDL_MULTIGESTURE also covers
+	 * SDL_CONTROLLERDEVICEADDED/REMOVED, which sit between them in the
+	 * event enum -- so a pad unplugged while the game was running would
+	 * be dropped here and ph_input would go on holding a dead handle.
+	 * Device events are left in the queue.
+	 */
 	SDL_PumpEvents();
-	SDL_FlushEvents(SDL_KEYDOWN, SDL_MULTIGESTURE);
+	SDL_FlushEvents(SDL_KEYDOWN, SDL_TEXTINPUT);
+	SDL_FlushEvents(SDL_MOUSEMOTION, SDL_MOUSEWHEEL);
+	SDL_FlushEvents(SDL_CONTROLLERAXISMOTION, SDL_CONTROLLERBUTTONUP);
 }
 
 /* Keys that keep their meaning while the search field has focus.  Every
@@ -169,7 +180,7 @@ ph_app_run(const struct ph_paths *p)
 	struct ph_layout  lay;
 	Uint64 t_prev;
 	float  t_total = 0.0f;
-	int    rc = 1, running = 1, searching = 0, skip_text = 0;
+	int    rc = 1, running = 1, skip_text = 0;
 	int    drawable_w = 0, drawable_h = 0;
 
 	ph_lib_init(&lib);
@@ -286,8 +297,17 @@ ph_app_run(const struct ph_paths *p)
 			case SDL_KEYDOWN: {
 				enum ph_action a;
 
+				/*
+				 * Ask the UI directly rather than using a
+				 * value cached at the end of the previous
+				 * frame: SDL delivers events in batches, so
+				 * the '/' that opens the search field and the
+				 * first character typed into it can arrive in
+				 * the same batch.  With a stale flag that
+				 * first character was routed as a binding.
+				 */
 				skip_text = 0;
-				if (searching) {
+				if (ph_ui_is_searching(ui)) {
 					if (e.key.keysym.sym == SDLK_BACKSPACE) {
 						ph_ui_backspace(ui);
 						break;
@@ -364,6 +384,9 @@ ph_app_run(const struct ph_paths *p)
 				ph_gfx_resize(gfx, drawable_w, drawable_h);
 				break;
 			case PH_REQ_RELOAD:
+				/* The GL texture names live in the records
+				 * ph_lib_scan is about to discard. */
+				ph_ui_release_covers(ui);
 				if (ph_lib_scan(&lib, p) == 0) {
 					ph_ui_refresh(ui);
 					ph_ui_toast(ui, "rescanned: %zu games",
@@ -383,10 +406,6 @@ ph_app_run(const struct ph_paths *p)
 				break;
 			}
 		}
-
-		/* The UI owns the search mode; app.c only needs to know so it
-		 * can route keys between navigation and typing. */
-		searching = ph_ui_is_searching(ui);
 
 		ph_gfx_frame_begin(gfx, theme.bg);
 		ph_ui_draw(ui, t_total);

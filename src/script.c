@@ -151,12 +151,25 @@ ph_script_open(const struct ph_paths *p)
 	}
 	luaL_openlibs(s->L);
 
-	/* So a user's config.lua can `require` helpers from the same dir. */
+	/*
+	 * So a user's config.lua can `require` helpers from the policy
+	 * directory and from their own library root.
+	 *
+	 * These are *prepended* to the existing package.path rather than
+	 * replacing it: overwriting it outright made every module Lua ships
+	 * with undiscoverable, so a `require` of anything standard failed.
+	 */
 	lua_getglobal(s->L, "package");
 	if (lua_istable(s->L, -1)) {
-		char pat[PH_PATH_MAX + 8];
+		char pat[PH_PATH_MAX * 2 + 64];
+		const char *orig;
 
-		snprintf(pat, sizeof(pat), "%s/?.lua", s->luadir);
+		lua_getfield(s->L, -1, "path");
+		orig = lua_isstring(s->L, -1) ? lua_tostring(s->L, -1) : "";
+		snprintf(pat, sizeof(pat), "%s/?.lua;%s/?.lua;%s",
+		    s->luadir, p->root, orig);
+		lua_pop(s->L, 1);
+
 		lua_pushstring(s->L, pat);
 		lua_setfield(s->L, -2, "path");
 	}
@@ -310,9 +323,12 @@ ph_script_theme_count(struct ph_script *s)
 
 	if (!push_reg(L, (const char *)&K_THEME))
 		return 0;
+	/* Count only string keys, so this agrees with the list
+	 * ph_script_theme_name() builds; anything else is not a theme. */
 	lua_pushnil(L);
 	while (lua_next(L, -2) != 0) {
-		n++;
+		if (lua_type(L, -2) == LUA_TSTRING)
+			n++;
 		lua_pop(L, 1);
 	}
 	lua_pop(L, 1);
@@ -332,9 +348,17 @@ ph_script_theme_name(struct ph_script *s, int idx, char *dst, size_t dstsize)
 
 	if (!push_reg(L, (const char *)&K_THEME))
 		return -1;
+	/*
+	 * The capacity test belongs inside the body, not in the while
+	 * condition: lua_next() has already pushed a key and a value by the
+	 * time the condition is evaluated, so bailing out there left two
+	 * items on the stack and unbalanced it.  Here the traversal always
+	 * runs to completion and simply stops storing once full.
+	 */
 	lua_pushnil(L);
-	while (lua_next(L, -2) != 0 && n < (int)(sizeof(names) / sizeof(names[0]))) {
-		if (lua_type(L, -2) == LUA_TSTRING)
+	while (lua_next(L, -2) != 0) {
+		if (lua_type(L, -2) == LUA_TSTRING &&
+		    n < (int)(sizeof(names) / sizeof(names[0])))
 			strlcpy(names[n++], lua_tostring(L, -2), sizeof(names[0]));
 		lua_pop(L, 1);
 	}

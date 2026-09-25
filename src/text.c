@@ -277,11 +277,14 @@ ph_text_draw_n(struct ph_gfx *g, struct ph_font *f, float x, float y,
     const char *s, int len, ph_rgba c)
 {
 	const char *p = s, *end;
-	float pen = x, base = y + f->ascent;
+	float pen = x, base;
 	uint32_t cp, prev = 0;
 
+	/* The guard must precede any use of f: base was previously computed
+	 * in the initializer, which dereferenced f before this check. */
 	if (f == NULL || s == NULL)
 		return x;
+	base = y + f->ascent;
 	end = (len < 0) ? NULL : s + len;
 
 	while (*p != '\0' && (end == NULL || p < end)) {
@@ -382,6 +385,22 @@ ph_text_wrap(struct ph_font *f, const char *s, float maxw,
 
 	while (n < max_lines) {
 		if (*p == '\0' || *p == '\n') {
+			/*
+			 * The run up to a terminator still has to fit.  Without
+			 * this check the last line of a paragraph was emitted
+			 * at whatever width it happened to be and ran past the
+			 * panel, because the break test below only fires on a
+			 * space.
+			 */
+			if (word > line &&
+			    ph_text_width_n(f, line, (int)(p - line)) > maxw) {
+				out[n].p = line;
+				out[n].len = (int)(word - line - 1);
+				n++;
+				line = word;
+				if (n >= max_lines)
+					break;
+			}
 			out[n].p = line;
 			out[n].len = (int)(p - line);
 			n++;

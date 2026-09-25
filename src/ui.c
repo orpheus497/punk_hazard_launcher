@@ -173,10 +173,25 @@ row_pitch(const struct ph_ui *u)
 /* ------------------------------------------------------------------ *
  * The filtered view
  * ------------------------------------------------------------------ */
+/*
+ * Remember which game is selected, by slug.
+ *
+ * Neither the index nor the struct address survives ph_lib_sort(): it
+ * reorders the array in place, so after a sort the old index names a
+ * different game and the old pointer names whatever was moved into that
+ * slot.  The slug is the only stable identity a game has.
+ */
 static void
-rebuild_view(struct ph_ui *u)
+remember_sel(struct ph_ui *u, char *dst, size_t n)
 {
-	struct ph_game *keep = sel_game(u);
+	struct ph_game *g = sel_game(u);
+
+	strlcpy(dst, g != NULL ? g->slug : "", n);
+}
+
+static void
+rebuild_view(struct ph_ui *u, const char *keep_slug)
+{
 	size_t i;
 
 	if (u->lib->n > u->capview) {
@@ -192,9 +207,9 @@ rebuild_view(struct ph_ui *u)
 	 * where possible; nothing is more disorienting than a grid that
 	 * jumps to the top every time you type a character. */
 	u->sel = 0;
-	if (keep != NULL) {
+	if (keep_slug != NULL && *keep_slug != '\0') {
 		for (i = 0; i < u->nview; i++) {
-			if (&u->lib->v[u->view[i]] == keep) {
+			if (strcmp(u->lib->v[u->view[i]].slug, keep_slug) == 0) {
 				u->sel = (int)i;
 				break;
 			}
@@ -277,14 +292,17 @@ ph_ui_create(struct ph_gfx *g, struct ph_script *sc, struct ph_lib *lib,
 	 * character cell, so a "huge" icon needs a genuinely huge face to
 	 * fill a tile. */
 	u->f_huge  = ph_font_create(ph_font_bold,    ph_font_bold_len,    lay->font_px_title * 3);
-	if (u->f_body == NULL || u->f_small == NULL || u->f_title == NULL) {
+	/* f_huge is used by the tile placeholder and the empty-library
+	 * screen, so it is as required as the rest. */
+	if (u->f_body == NULL || u->f_small == NULL || u->f_title == NULL ||
+	    u->f_huge == NULL) {
 		ph_warn("ui: could not build the typeface");
 		ph_ui_destroy(u);
 		return NULL;
 	}
 	ph_sysmon_init(&u->mon);
 	ph_lib_sort(u->lib, u->sort);
-	rebuild_view(u);
+	rebuild_view(u, NULL);
 	return u;
 }
 
@@ -293,6 +311,7 @@ ph_ui_destroy(struct ph_ui *u)
 {
 	if (u == NULL)
 		return;
+	ph_ui_release_covers(u);
 	ph_font_destroy(u->f_body);
 	ph_font_destroy(u->f_small);
 	ph_font_destroy(u->f_title);
@@ -304,9 +323,38 @@ ph_ui_destroy(struct ph_ui *u)
 void
 ph_ui_refresh(struct ph_ui *u)
 {
+	char keep[PH_SLUG_MAX];
+
+	remember_sel(u, keep, sizeof(keep));
 	ph_lib_sort(u->lib, u->sort);
-	rebuild_view(u);
+	rebuild_view(u, keep);
 	ensure_visible(u);
+}
+
+/*
+ * Drop every loaded cover texture.
+ *
+ * The GL texture name lives in the ph_game record, so ph_lib_free() -- which
+ * a rescan calls before refilling the library -- would throw the record away
+ * with the texture still allocated in the driver.  Nothing else holds that
+ * name, so it could never be deleted: every press of R leaked one texture per
+ * game with cover art.  Must be called before ph_lib_scan(), and on teardown.
+ */
+void
+ph_ui_release_covers(struct ph_ui *u)
+{
+	size_t i;
+
+	if (u == NULL || u->lib == NULL)
+		return;
+	for (i = 0; i < u->lib->n; i++) {
+		struct ph_game *g = &u->lib->v[i];
+
+		if (g->cover_tex != 0)
+			ph_gfx_tex_free(g->cover_tex);
+		g->cover_tex = 0;
+		g->cover_tried = 0;
+	}
 }
 
 void
@@ -442,13 +490,19 @@ ph_ui_action(struct ph_ui *u, enum ph_action a)
 	case PH_ACT_BACK:
 		if (u->mode == MODE_SEARCH || u->mode == MODE_HELP) {
 			if (u->mode == MODE_SEARCH && u->query[0] != '\0') {
+				char keep[PH_SLUG_MAX];
+
+				remember_sel(u, keep, sizeof(keep));
 				u->query[0] = '\0';
-				rebuild_view(u);
+				rebuild_view(u, keep);
 			}
 			u->mode = MODE_LIBRARY;
 		} else if (u->query[0] != '\0') {
+			char keep[PH_SLUG_MAX];
+
+			remember_sel(u, keep, sizeof(keep));
 			u->query[0] = '\0';
-			rebuild_view(u);
+			rebuild_view(u, keep);
 		}
 		break;
 
@@ -479,19 +533,25 @@ ph_ui_action(struct ph_ui *u, enum ph_action a)
 
 	case PH_ACT_THEME: cycle_theme(u, +1); break;
 
-	case PH_ACT_SORT:
+	case PH_ACT_SORT: {
+		char keep[PH_SLUG_MAX];
+
+		remember_sel(u, keep, sizeof(keep));
 		u->sort = (enum ph_sort)((u->sort + 1) % PH_SORT__COUNT);
 		ph_lib_sort(u->lib, u->sort);
-		rebuild_view(u);
+		rebuild_view(u, keep);
 		ensure_visible(u);
 		ph_ui_toast(u, "sort: %s", ph_sort_name(u->sort));
 		break;
+	}
 
 	case PH_ACT_FAVORITE: {
 		struct ph_game *g = sel_game(u);
+		char keep[PH_SLUG_MAX];
 
 		if (g == NULL)
 			break;
+		strlcpy(keep, g->slug, sizeof(keep));
 		g->favorite = !g->favorite;
 		if (ph_game_save(g) != 0)
 			ph_ui_toast(u, "could not save %s", g->slug);
@@ -499,7 +559,7 @@ ph_ui_action(struct ph_ui *u, enum ph_action a)
 			ph_ui_toast(u, "%s %s", g->title,
 			    g->favorite ? "favourited" : "unfavourited");
 		ph_lib_sort(u->lib, u->sort);
-		rebuild_view(u);
+		rebuild_view(u, keep);
 		ensure_visible(u);
 		break;
 	}
@@ -521,8 +581,13 @@ ph_ui_text(struct ph_ui *u, const char *utf8)
 	add = strlen(utf8);
 	if (have + add + 1 >= sizeof(u->query))
 		return;
-	memcpy(u->query + have, utf8, add + 1);
-	rebuild_view(u);
+	{
+		char keep[PH_SLUG_MAX];
+
+		remember_sel(u, keep, sizeof(keep));
+		memcpy(u->query + have, utf8, add + 1);
+		rebuild_view(u, keep);
+	}
 	ensure_visible(u);
 }
 
@@ -539,8 +604,13 @@ ph_ui_backspace(struct ph_ui *u)
 		n--;
 	if (n > 0)
 		n--;
-	u->query[n] = '\0';
-	rebuild_view(u);
+	{
+		char keep[PH_SLUG_MAX];
+
+		remember_sel(u, keep, sizeof(keep));
+		u->query[n] = '\0';
+		rebuild_view(u, keep);
+	}
 }
 
 /* Which tile is under (x,y)?  -1 for none. */
@@ -1032,6 +1102,22 @@ draw_panel(struct ph_ui *u)
 	 * the blocks from overlapping when the window is short.
 	 */
 	opt_rowh   = ph_font_height(u->f_body) * 1.75f;
+	/*
+	 * Cap the options block at a little over half the panel.  At a
+	 * comfortable row height nine options need ~410px, which on a
+	 * 1440x810 window is most of the panel and pushed the description
+	 * -- the thing a details panel is chiefly for -- off the bottom
+	 * entirely.  Compact the rows instead, down to a readable floor.
+	 */
+	{
+		float cap = h * 0.55f;
+		float floor_h = ph_font_height(u->f_body) * 1.25f;
+
+		if (opt_rowh * (float)NOPTIONS > cap)
+			opt_rowh = cap / (float)NOPTIONS;
+		if (opt_rowh < floor_h)
+			opt_rowh = floor_h;
+	}
 	opt_top    = y + h - pad - opt_rowh * (float)NOPTIONS;
 	opt_head_y = opt_top - ph_font_height(u->f_small) * 1.7f;
 	exec_y     = opt_head_y - ph_font_height(u->f_small) * 1.9f;

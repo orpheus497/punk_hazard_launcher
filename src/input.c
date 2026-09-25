@@ -71,8 +71,26 @@ ph_input_device_event(struct ph_input *in, const SDL_Event *e)
 	int i;
 
 	if (e->type == SDL_CONTROLLERDEVICEADDED) {
+		SDL_JoystickID id;
+
 		if (in->npads >= MAX_PADS || !SDL_IsGameController(e->cdevice.which))
 			return;
+		/*
+		 * SDL can report a device we already hold -- notably when the
+		 * launcher regains focus after a game exits.  Opening it twice
+		 * leaves a duplicate handle that is never closed and makes one
+		 * physical pad move the cursor two steps per press.
+		 */
+		id = SDL_JoystickGetDeviceInstanceID(e->cdevice.which);
+		for (i = 0; i < in->npads; i++) {
+			SDL_Joystick *j;
+
+			if (in->pads[i] == NULL)
+				continue;
+			j = SDL_GameControllerGetJoystick(in->pads[i]);
+			if (j != NULL && SDL_JoystickInstanceID(j) == id)
+				return;
+		}
 		in->pads[in->npads] = SDL_GameControllerOpen(e->cdevice.which);
 		if (in->pads[in->npads] != NULL) {
 			ph_info("gamepad attached: %s",

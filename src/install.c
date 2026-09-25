@@ -431,6 +431,19 @@ ph_install(const struct ph_paths *p, const char *src,
 	/* --- 1. archive -> staging ------------------------------------ */
 	strlcpy(payload, abssrc, sizeof(payload));
 	if (src_is_file && is_archive(abssrc)) {
+		/*
+		 * --link records absolute paths and copies nothing, but an
+		 * archive has to be unpacked somewhere first, and that staging
+		 * directory is removed when this function returns.  The two
+		 * together would leave a manifest pointing into a deleted
+		 * tree, so refuse rather than produce a broken entry.
+		 */
+		if (o->link_only) {
+			ph_warn("--link cannot be used with an archive: "
+			    "extract %s yourself, then --link the directory",
+			    abssrc);
+			goto out;
+		}
 		if (snprintf(staging, sizeof(staging), "%s/.staging-%ld",
 		    p->root, (long)getpid()) >= (int)sizeof(staging))
 			goto out;

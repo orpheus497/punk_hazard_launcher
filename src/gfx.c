@@ -670,9 +670,24 @@ ph_gfx_tex_file(const char *path, int *w, int *h)
 	unsigned char *px;
 	unsigned t;
 	int iw = 0, ih = 0;
+	GLint maxdim = 0;
 
 	if ((px = ph_image_load(path, &iw, &ih)) == NULL)
 		return 0;
+	/*
+	 * GL_MAX_TEXTURE_SIZE is a real, driver-specific limit (as low as
+	 * 2048 on some GLES 2.0 hardware).  Handing glTexImage2D something
+	 * larger does not fail loudly -- it raises GL_INVALID_VALUE and
+	 * leaves an incomplete texture that renders as nothing -- so an
+	 * oversized cover is rejected here instead.
+	 */
+	glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxdim);
+	if (maxdim > 0 && (iw > maxdim || ih > maxdim)) {
+		ph_warn("cover too large for this GL (%dx%d, max %d): %s",
+		    iw, ih, (int)maxdim, path);
+		ph_image_free(px);
+		return 0;
+	}
 	t = ph_gfx_tex_rgba(px, iw, ih);
 	ph_image_free(px);
 	if (w != NULL) *w = iw;

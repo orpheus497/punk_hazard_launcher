@@ -706,7 +706,7 @@ int
 ph_have_cmd(const char *name)
 {
 	const char *path, *p, *e;
-	char buf[PH_PATH_MAX];
+	char buf[PH_PATH_MAX], cand[PH_PATH_MAX];
 	size_t n;
 
 	if (strchr(name, '/') != NULL)
@@ -722,7 +722,11 @@ ph_have_cmd(const char *name)
 			continue;
 		memcpy(buf, p, n);
 		buf[n] = '\0';
-		if (ph_join(buf, sizeof(buf), buf, name) == 0 && ph_is_exec(buf))
+		/* Build into a separate buffer: ph_join() starts with a
+		 * strlcpy(dst, a, ...), and passing the same object as both
+		 * would be an overlapping copy. */
+		if (ph_join(cand, sizeof(cand), buf, name) == 0 &&
+		    ph_is_exec(cand))
 			return 1;
 		if (*e == '\0')
 			break;

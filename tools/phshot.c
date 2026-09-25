@@ -137,7 +137,7 @@ main(int argc, char **argv)
 	unsigned char *px;
 	const char *out = "shot.png", *want_theme = NULL, *search = NULL;
 	int w = 1600, h = 900, crt = -1, select_n = 0, help = 0, tab = 0;
-	int opt_n = 0, i, f, pw, ph_h;
+	int opt_n = 0, sort_n = 0, i, f, pw, ph_h;
 
 	for (i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) out = argv[++i];
@@ -148,6 +148,7 @@ main(int argc, char **argv)
 		else if (strcmp(argv[i], "--select") == 0 && i + 1 < argc) select_n = atoi(argv[++i]);
 		else if (strcmp(argv[i], "--help-overlay") == 0) help = 1;
 		else if (strcmp(argv[i], "--tab") == 0) tab = 1;
+		else if (strcmp(argv[i], "--sort") == 0 && i + 1 < argc) sort_n = atoi(argv[++i]);
 		else if (strcmp(argv[i], "--option") == 0 && i + 1 < argc) opt_n = atoi(argv[++i]);
 		else if (strcmp(argv[i], "--no-crt") == 0) crt = 0;
 		else if (strcmp(argv[i], "--crt") == 0) crt = 1;
@@ -201,6 +202,8 @@ main(int argc, char **argv)
 	}
 	for (i = 0; i < select_n; i++)
 		ph_ui_action(ui, PH_ACT_RIGHT);
+	for (i = 0; i < sort_n; i++)
+		ph_ui_action(ui, PH_ACT_SORT);
 	if (tab) {
 		ph_ui_action(ui, PH_ACT_DETAILS);	/* focus the panel */
 		for (i = 0; i < opt_n; i++)

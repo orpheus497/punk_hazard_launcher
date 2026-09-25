@@ -149,12 +149,20 @@ set_field(struct ph_game *g, const char *k, char *v)
 int
 ph_manifest_read(struct ph_game *g, const char *path)
 {
-	char line[PH_DESC_MAX + 256];
+	char *line = NULL;
+	size_t cap = 0;
+	ssize_t len;
 	FILE *f;
 
 	if ((f = fopen(path, "r")) == NULL)
 		return -1;
-	while (fgets(line, (int)sizeof(line), f) != NULL) {
+	/*
+	 * getline(3), not fgets(3): fgets with a fixed buffer silently
+	 * splits an over-long record, and the tail is then parsed as if it
+	 * were the next line -- which can set a field from a fragment.  One
+	 * line is one record, whatever its length.
+	 */
+	while ((len = getline(&line, &cap, f)) > 0) {
 		char *eq, *k, *v;
 
 		line[strcspn(line, "\n")] = '\0';
@@ -170,6 +178,7 @@ ph_manifest_read(struct ph_game *g, const char *path)
 		if (*k != '\0')
 			set_field(g, k, v);
 	}
+	free(line);
 	fclose(f);
 	return 0;
 }
@@ -214,7 +223,28 @@ ph_manifest_write(const struct ph_game *g, const char *path)
 	fprintf(f, "play_seconds = %lu\n",  g->play_seconds);
 	fprintf(f, "favorite = %d\n",       g->favorite);
 
-	if (fflush(f) != 0 || fclose(f) != 0) {
+	/*
+	 * Close on every path -- the previous `fflush(f) != 0 || fclose(f)`
+	 * short-circuited and leaked the stream when the flush failed.
+	 *
+	 * fsync(2) before rename(2) is what makes the atomicity claim real:
+	 * rename is atomic with respect to the directory entry, but it does
+	 * not promise the file's *contents* reached the disk first.  Without
+	 * the sync a crash can leave the entry pointing at a zero-length
+	 * manifest, which is precisely the outcome the temp-file dance is
+	 * meant to prevent.
+	 */
+	if (fflush(f) != 0) {
+		fclose(f);
+		unlink(tmp);
+		return -1;
+	}
+	if (fsync(fileno(f)) != 0 && errno != EINVAL) {
+		fclose(f);
+		unlink(tmp);
+		return -1;
+	}
+	if (fclose(f) != 0) {
 		unlink(tmp);
 		return -1;
 	}
@@ -301,9 +331,14 @@ find_cover(struct ph_game *g)
 	char abs[PH_PATH_MAX];
 
 	if (g->cover[0] != '\0') {
-		if (g->cover[0] == '/')
-			return;			/* already absolute */
-		if (ph_join(abs, sizeof(abs), g->dir, g->cover) == 0 &&
+		/* An absolute path is used only if it is really there; a
+		 * stale one now falls through to the search below instead of
+		 * leaving the game with a cover that cannot be opened. */
+		if (g->cover[0] == '/') {
+			if (ph_is_file(g->cover))
+				return;
+			g->cover[0] = '\0';
+		} else if (ph_join(abs, sizeof(abs), g->dir, g->cover) == 0 &&
 		    ph_is_file(abs)) {
 			strlcpy(g->cover, abs, sizeof(g->cover));
 			return;
