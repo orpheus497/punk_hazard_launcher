@@ -18,5 +18,13 @@ return {
     crt        = true,
 
     show_fps   = false,
+
+    -- Run a game inside the launcher's own window, in the grid area, with
+    -- the panels still visible around it.  This is an X11 capability
+    -- (XReparentWindow); under Wayland a client cannot embed another
+    -- client's surface at all, so there the launcher hides itself and the
+    -- game takes the screen instead.  See src/embed.h.
+    embed      = true,
+
     theme      = "hazard",
 }

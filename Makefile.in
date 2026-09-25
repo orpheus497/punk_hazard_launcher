@@ -20,6 +20,8 @@ PREFIX    = @PREFIX@
 BINDIR    = $(PREFIX)/bin
 DATADIR   = $(PREFIX)/share/punkhazard
 MANDIR    = $(PREFIX)/share/man/man6
+APPDIR    = $(PREFIX)/share/applications
+ICONDIR   = $(PREFIX)/share/icons/hicolor
 
 INCS      = -Isrc -Ithird_party/stb
 DEFS      = -DPH_DATADIR=\"$(DATADIR)\"
@@ -42,6 +44,7 @@ OBJS = \
 	src/catalog.o \
 	src/install.o \
 	src/launch.o \
+	src/embed.o \
 	src/script.o \
 	src/gfx.o \
 	src/text.o \
@@ -56,7 +59,7 @@ GENOBJS = \
 	gen/font_regular.o \
 	gen/font_bold.o
 
-HDRS = src/ph.h src/gfx.h src/text.h src/ui.h src/script.h src/input.h src/sysmon.h
+HDRS = src/ph.h src/gfx.h src/text.h src/ui.h src/script.h src/input.h src/sysmon.h src/embed.h
 
 .SUFFIXES:
 .SUFFIXES: .c .o
@@ -110,6 +113,15 @@ SHOTOBJS = \
 	src/util.o src/sysmon.o src/catalog.o src/install.o src/launch.o src/script.o \
 	src/gfx.o src/text.o src/ui.o src/stb.o $(GENOBJS)
 
+# embedtest asserts, against a live X server, that a game's window really
+# is reparented into ours.  `make embedtest` then:
+#     Xvfb :99 -screen 0 1280x800x24 &
+#     DISPLAY=:99 ./tools/embedtest /path/to/any-windowed-program
+embedtest: tools/embedtest
+tools/embedtest: tools/embedtest.c src/embed.o src/util.o $(HDRS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o tools/embedtest tools/embedtest.c \
+	    src/embed.o src/util.o $(LIBS)
+
 shot: tools/phshot
 tools/phshot: tools/phshot.c $(SHOTOBJS) $(HDRS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o tools/phshot tools/phshot.c \
@@ -127,15 +139,31 @@ install: $(PROG)
 	$(INSTALL_LIB) lua/keys.lua     $(DESTDIR)$(DATADIR)/lua/keys.lua
 	$(INSTALL_LIB) lua/install.lua  $(DESTDIR)$(DATADIR)/lua/install.lua
 	$(INSTALL_LIB) man/punkhazard.6 $(DESTDIR)$(MANDIR)/punkhazard.6
+	$(INSTALL_DIR) $(DESTDIR)$(APPDIR)
+	$(INSTALL_LIB) share/punk_hazard.desktop \
+	    $(DESTDIR)$(APPDIR)/punk_hazard.desktop
+	$(INSTALL_DIR) $(DESTDIR)$(ICONDIR)/scalable/apps
+	$(INSTALL_LIB) share/icons/punkhazard.svg \
+	    $(DESTDIR)$(ICONDIR)/scalable/apps/punkhazard.svg
+	for s in 16 22 24 32 48 64 128 256 512; do \
+		$(INSTALL_DIR) $(DESTDIR)$(ICONDIR)/$${s}x$${s}/apps || exit 1; \
+		$(INSTALL_LIB) share/icons/punkhazard-$${s}.png \
+		    $(DESTDIR)$(ICONDIR)/$${s}x$${s}/apps/punkhazard.png || exit 1; \
+	done
 
 uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/$(PROG)
 	rm -f $(DESTDIR)$(MANDIR)/punkhazard.6
+	rm -f $(DESTDIR)$(APPDIR)/punk_hazard.desktop
+	rm -f $(DESTDIR)$(ICONDIR)/scalable/apps/punkhazard.svg
+	for s in 16 22 24 32 48 64 128 256 512; do \
+		rm -f $(DESTDIR)$(ICONDIR)/$${s}x$${s}/apps/punkhazard.png; \
+	done
 	rm -rf $(DESTDIR)$(DATADIR)
 
 # --- housekeeping ---------------------------------------------------------
 clean:
-	rm -f $(PROG) $(OBJS) $(GENOBJS) $(BIN2C) tools/phshot
+	rm -f $(PROG) $(OBJS) $(GENOBJS) $(BIN2C) tools/phshot tools/embedtest
 
 distclean: clean
 	rm -rf gen Makefile
@@ -144,4 +172,4 @@ distclean: clean
 run: $(PROG)
 	PUNKHAZARD_LUA=lua ./$(PROG)
 
-.PHONY: all install uninstall clean distclean run shot
+.PHONY: all install uninstall clean distclean run shot embedtest

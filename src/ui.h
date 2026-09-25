@@ -22,13 +22,37 @@
 
 enum ph_req {
 	PH_REQ_NONE = 0,
-	PH_REQ_LAUNCH,		/* *out is the game to run */
+	PH_REQ_LAUNCH,		/* *out is the game to run      */
 	PH_REQ_QUIT,
-	PH_REQ_FULLSCREEN,	/* toggle */
-	PH_REQ_RELOAD		/* rescan the library from disk */
+	PH_REQ_FULLSCREEN,	/* toggle                       */
+	PH_REQ_RELOAD,		/* rescan the library from disk */
+	PH_REQ_INSTALL,		/* import: see ph_ui_install_data() */
+	PH_REQ_REMOVE		/* *out is the game to delete   */
+};
+
+/*
+ * What the import form collected.
+ *
+ * The UI does not run the import itself: ph_install() forks a build that
+ * can take minutes, and doing that between two frames would freeze the
+ * window with no explanation.  app.c owns the request, paints a visible
+ * "working" frame first, and then performs it.
+ */
+struct ph_ui_install {
+	char path[PH_PATH_MAX];
+	char title[PH_TITLE_MAX];
+	char genre[64];
+	char year[8];
+	char developer[96];
+	char cover[PH_PATH_MAX];
+	char args[PH_ARGS_MAX];
+	int  build;
 };
 
 struct ph_ui;
+
+/* Valid only while a PH_REQ_INSTALL is being handled. */
+const struct ph_ui_install *ph_ui_install_data(const struct ph_ui *u);
 
 /*
  * `cfg`, `theme` and `lay` stay owned by the caller and are read every
@@ -37,7 +61,7 @@ struct ph_ui;
  */
 struct ph_ui *ph_ui_create(struct ph_gfx *g, struct ph_script *sc,
     struct ph_lib *lib, struct ph_config *cfg, struct ph_theme *theme,
-    const struct ph_layout *lay);
+    const struct ph_layout *lay, const struct ph_paths *paths);
 void ph_ui_destroy(struct ph_ui *u);
 
 /* The library changed underneath us (rescan, install, delete). */
@@ -53,12 +77,29 @@ void ph_ui_release_covers(struct ph_ui *u);
 void ph_ui_action(struct ph_ui *u, enum ph_action a);
 void ph_ui_text(struct ph_ui *u, const char *utf8);   /* search typing */
 void ph_ui_backspace(struct ph_ui *u);
-/* True while the search field has keyboard focus, so app.c knows to
- * route printable keys to typing rather than to bindings. */
+/*
+ * True while a text field has keyboard focus -- the search bar or any
+ * field in the add/edit form -- so app.c routes printable keys to typing
+ * rather than to bindings.
+ */
 int  ph_ui_is_searching(const struct ph_ui *u);
+int  ph_ui_is_typing(const struct ph_ui *u);
 void ph_ui_mouse_move(struct ph_ui *u, int x, int y);
 void ph_ui_mouse_click(struct ph_ui *u, int x, int y, int clicks);
 void ph_ui_mouse_wheel(struct ph_ui *u, int dy);
+
+/*
+ * The grid rectangle in window coordinates, valid after the first draw.
+ * app.c needs it to size a game embedded into the launcher's window.
+ */
+void ph_ui_grid_rect(const struct ph_ui *u, int *x, int *y, int *w, int *h);
+
+/*
+ * Tell the UI a game is starting or running.  `title` NULL means idle.
+ * `embedded` distinguishes "running inside our window" (draw nothing over
+ * the grid; the game's own window is there) from "running elsewhere".
+ */
+void ph_ui_set_running(struct ph_ui *u, const char *title, int embedded);
 
 void ph_ui_update(struct ph_ui *u, float dt);
 void ph_ui_draw(struct ph_ui *u, float time_sec);

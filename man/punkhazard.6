@@ -116,6 +116,12 @@ are then absolute, and nothing is duplicated.
 Move around the grid.
 .It Ic Tab
 Move focus between the grid and the options panel.
+.It Ic A
+Add a game: a form for the path, title, metadata and box art.
+.It Ic E
+Edit the selected game, including replacing its cover art.
+.It Ic Del
+Remove the selected game and its files.
 .It Ic PageUp , PageDown
 Move a screenful.
 .It Ic Home , End
@@ -137,6 +143,8 @@ Cycle theme.
 Toggle the CRT post-process.
 .It Ic F11 , F
 Toggle fullscreen.
+While a game is running inside the launcher window, this instead gives the
+game the whole screen and hides the launcher.
 .It Ic F1 , ?
 Key help.
 .It Ic Esc
@@ -156,9 +164,33 @@ focuses the options panel,
 favourites, the shoulder buttons page, and
 .Ic Back
 cycles the sort key.
+In a form, the arrow keys move between fields,
+.Ic Enter
+advances,
+.Ic F2
+saves and
+.Ic Esc
+cancels.
+.Pp
 All bindings are defined in
 .Pa keys.lua
 and may be changed without recompiling.
+.Ss Running a game
+On X11 a launched game is reparented into the launcher's window with
+.Xr XReparentWindow 3
+and sized to the grid area, so the panels stay visible around it.
+.Pp
+Wayland does not permit this: its object identifiers are scoped to one
+client connection, so a client cannot reference \(em let alone adopt \(em a
+surface belonging to another process.
+Under Wayland, and wherever a game's window cannot be identified,
+.Nm
+hides itself and the game takes the screen instead.
+Set
+.Va embed
+to false in
+.Pa config.lua
+to always use that path.
 .Sh ENVIRONMENT
 .Bl -tag -width PUNKHAZARD_ROOT
 .It Ev PUNKHAZARD_ROOT
@@ -189,6 +221,10 @@ Box art.
 Transcript of the import and build.
 .It Pa ~/.local/share/punkhazard
 Default library root.
+.It Pa PREFIX/share/applications/punk_hazard.desktop
+Desktop entry.
+.It Pa PREFIX/share/icons/hicolor/*/apps/punkhazard.*
+Application icon, scalable and rasterised.
 .El
 .Sh EXIT STATUS
 .Ex -std
@@ -227,6 +263,9 @@ punkhazard ls | awk -F'\et' '$5 == "never" { print $2 }'
 .Xr tar 1 ,
 .Xr hier 7 ,
 .Xr sysctl 8
+.Pp
+.Xr XReparentWindow 3
+for the mechanism behind running a game inside the launcher window.
 .Sh STANDARDS
 The library root follows the XDG Base Directory Specification when
 .Ev XDG_DATA_HOME
@@ -244,3 +283,7 @@ Cover art is decoded by a vendored copy of
 .Nm stb_image ,
 which is not a hardened decoder.
 It parses whatever image files are present in the library directory.
+.Pp
+Importing a source tree from the graphical launcher blocks the window
+until the build finishes.
+The launcher says what it is doing, but does not animate while it waits.

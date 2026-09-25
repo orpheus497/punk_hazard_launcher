@@ -16,6 +16,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
+#include <sys/wait.h>
 
 /*
  * Elapsed time comes from CLOCK_MONOTONIC, not from time(2).
@@ -116,4 +118,119 @@ ph_launch(struct ph_game *g, struct ph_run_result *r)
 		ph_warn("%s: could not update manifest: %s", g->slug,
 		    strerror(errno));
 	return status;
+}
+
+/* ------------------------------------------------------------------ *
+ * Non-blocking launch
+ *
+ * Same mechanics as ph_launch(), split so the caller keeps its event loop.
+ * ph_launch() itself is left intact for the CLI, where blocking is exactly
+ * what `punkhazard run` should do.
+ * ------------------------------------------------------------------ */
+int
+ph_launch_start(struct ph_game *g, struct ph_session *s)
+{
+	char exec[PH_PATH_MAX], work[PH_PATH_MAX];
+	char **words = NULL, *store = NULL, **argv = NULL;
+	int nwords, i;
+	pid_t pid;
+
+	memset(s, 0, sizeof(*s));
+
+	if (g->exec[0] == '\0') {
+		ph_warn("%s: no exec set in the manifest", g->slug);
+		return -1;
+	}
+	if (ph_game_exec_path(g, exec, sizeof(exec)) != 0 || !ph_is_exec(exec)) {
+		ph_warn("%s: not executable: %s", g->slug, exec);
+		return -1;
+	}
+	if (ph_game_work_path(g, work, sizeof(work)) != 0 || !ph_is_dir(work)) {
+		ph_warn("%s: bad working directory", g->slug);
+		return -1;
+	}
+
+	nwords = ph_argsplit(g->args, &words, &store);
+	argv = ph_xcalloc((size_t)nwords + 2, sizeof(*argv));
+	argv[0] = exec;
+	for (i = 0; i < nwords; i++)
+		argv[i + 1] = words[i];
+	argv[nwords + 1] = NULL;
+
+	clock_gettime(CLOCK_MONOTONIC, &s->t0);
+
+	if ((pid = fork()) < 0) {
+		ph_warn("fork: %s", strerror(errno));
+		free(argv); free(words); free(store);
+		return -1;
+	}
+	if (pid == 0) {
+		if (chdir(work) != 0)
+			_exit(126);
+		execvp(argv[0], argv);
+		_exit(127);	/* conventional "command not found" */
+	}
+
+	free(argv);
+	free(words);
+	free(store);
+
+	s->pid = pid;
+	s->running = 1;
+	ph_info("launched %s as pid %ld", exec, (long)pid);
+	return 0;
+}
+
+int
+ph_launch_poll(struct ph_session *s, int *status)
+{
+	int st;
+	pid_t w;
+
+	if (!s->running)
+		return 1;
+	/* WNOHANG: ask, do not wait -- this runs once per frame. */
+	while ((w = waitpid(s->pid, &st, WNOHANG)) < 0 && errno == EINTR)
+		;
+	if (w == 0)
+		return 0;
+	if (w < 0)
+		return -1;
+
+	s->running = 0;
+	if (status != NULL) {
+		if (WIFEXITED(st))
+			*status = WEXITSTATUS(st);
+		else if (WIFSIGNALED(st))
+			*status = 128 + WTERMSIG(st);
+		else
+			*status = -1;
+	}
+	return 1;
+}
+
+void
+ph_launch_finish(struct ph_game *g, struct ph_session *s, int status,
+    struct ph_run_result *r)
+{
+	struct timespec t1;
+	unsigned long secs;
+
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	secs = elapsed_seconds(&s->t0, &t1);
+
+	g->play_count++;
+	g->last_played = time(NULL);
+	/* A session under five seconds is almost always a crash or a
+	 * mis-set exec line: it counts as a launch but adds no playtime. */
+	if (secs >= 5)
+		g->play_seconds += secs;
+
+	if (r != NULL) {
+		r->status = status;
+		r->seconds = secs;
+	}
+	if (ph_game_save(g) != 0)
+		ph_warn("%s: could not update manifest: %s", g->slug,
+		    strerror(errno));
 }

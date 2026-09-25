@@ -237,6 +237,7 @@ ph_script_config(struct ph_script *s, struct ph_config *c)
 	c->vsync      = get_int(L, t, "vsync",         1);
 	c->crt        = get_int(L, t, "crt",           1);
 	c->show_fps   = get_int(L, t, "show_fps",      0);
+	c->embed      = get_int(L, t, "embed",         1);
 	get_str(L, t, "theme", c->theme, sizeof(c->theme), "hazard");
 	lua_pop(L, 1);
 	return 0;
@@ -405,6 +406,10 @@ static const struct {
 	{ "theme",      PH_ACT_THEME     },
 	{ "reload",     PH_ACT_RELOAD    },
 	{ "help",       PH_ACT_HELP      },
+	{ "add",        PH_ACT_ADD       },
+	{ "edit",       PH_ACT_EDIT      },
+	{ "remove",     PH_ACT_REMOVE    },
+	{ "confirm",    PH_ACT_CONFIRM   },
 	{ NULL,         PH_ACT_NONE      }
 };
 

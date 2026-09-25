@@ -137,7 +137,9 @@ main(int argc, char **argv)
 	unsigned char *px;
 	const char *out = "shot.png", *want_theme = NULL, *search = NULL;
 	int w = 1600, h = 900, crt = -1, select_n = 0, help = 0, tab = 0;
-	int opt_n = 0, sort_n = 0, i, f, pw, ph_h;
+	int opt_n = 0, sort_n = 0, field_n = 0, i, f, pw, ph_h;
+	const char *form = NULL, *typed = NULL;
+	int submit = 0;
 
 	for (i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) out = argv[++i];
@@ -148,6 +150,10 @@ main(int argc, char **argv)
 		else if (strcmp(argv[i], "--select") == 0 && i + 1 < argc) select_n = atoi(argv[++i]);
 		else if (strcmp(argv[i], "--help-overlay") == 0) help = 1;
 		else if (strcmp(argv[i], "--tab") == 0) tab = 1;
+		else if (strcmp(argv[i], "--submit") == 0) submit = 1;
+		else if (strcmp(argv[i], "--form") == 0 && i + 1 < argc) form = argv[++i];
+		else if (strcmp(argv[i], "--field") == 0 && i + 1 < argc) field_n = atoi(argv[++i]);
+		else if (strcmp(argv[i], "--type") == 0 && i + 1 < argc) typed = argv[++i];
 		else if (strcmp(argv[i], "--sort") == 0 && i + 1 < argc) sort_n = atoi(argv[++i]);
 		else if (strcmp(argv[i], "--option") == 0 && i + 1 < argc) opt_n = atoi(argv[++i]);
 		else if (strcmp(argv[i], "--no-crt") == 0) crt = 0;
@@ -193,7 +199,7 @@ main(int argc, char **argv)
 
 	if ((gfx = ph_gfx_create(w, h)) == NULL)
 		return 1;
-	if ((ui = ph_ui_create(gfx, sc, &lib, &cfg, &theme, &lay)) == NULL)
+	if ((ui = ph_ui_create(gfx, sc, &lib, &cfg, &theme, &lay, &paths)) == NULL)
 		return 1;
 
 	if (search != NULL) {
@@ -211,6 +217,16 @@ main(int argc, char **argv)
 	}
 	if (help)
 		ph_ui_action(ui, PH_ACT_HELP);
+	if (form != NULL) {
+		ph_ui_action(ui, strcmp(form, "edit") == 0 ? PH_ACT_EDIT
+		                                           : PH_ACT_ADD);
+		for (i = 0; i < field_n; i++)
+			ph_ui_action(ui, PH_ACT_DOWN);
+		if (typed != NULL)
+			ph_ui_text(ui, typed);
+		if (submit)
+			ph_ui_action(ui, PH_ACT_CONFIRM);
+	}
 
 	/*
 	 * Draw several frames before capturing.  The first frame does the

@@ -169,6 +169,7 @@ struct ph_config {
 	int  vsync;
 	int  crt;              /* CRT post-process on/off */
 	int  show_fps;
+	int  embed;            /* run games inside our window where possible */
 	char theme[64];
 };
 
@@ -183,6 +184,10 @@ enum ph_action {
 	PH_ACT_FULLSCREEN, PH_ACT_SEARCH, PH_ACT_DETAILS,
 	PH_ACT_FAVORITE, PH_ACT_SORT, PH_ACT_CRT, PH_ACT_THEME,
 	PH_ACT_RELOAD, PH_ACT_HELP,
+	PH_ACT_ADD,      /* open the import form   */
+	PH_ACT_EDIT,     /* edit the selected game */
+	PH_ACT_REMOVE,   /* delete it              */
+	PH_ACT_CONFIRM,  /* accept a form / dialog */
 	PH_ACT__COUNT
 };
 
@@ -286,7 +291,30 @@ struct ph_run_result {
 	int           status;      /* exit status, or 128+signo */
 	unsigned long seconds;     /* measured on CLOCK_MONOTONIC */
 };
+
+/*
+ * Blocking launch: fork, wait, record.  Used by `punkhazard run`.
+ */
 int ph_launch(struct ph_game *g, struct ph_run_result *r);
+
+/*
+ * Non-blocking launch, for the GUI.
+ *
+ * The window has to keep drawing and keep answering the display server
+ * while a game runs -- both so the chrome around an embedded game stays
+ * alive, and so the launcher does not look hung.  So the fork and the
+ * wait are separated: start it, poll it each frame, finish it once.
+ */
+struct ph_session {
+	pid_t           pid;
+	struct timespec t0;
+	int             running;
+};
+int  ph_launch_start(struct ph_game *g, struct ph_session *s);
+/* 0 = still running, 1 = exited (status filled), -1 = error. */
+int  ph_launch_poll(struct ph_session *s, int *status);
+void ph_launch_finish(struct ph_game *g, struct ph_session *s, int status,
+         struct ph_run_result *r);
 
 /* ------------------------------------------------------------------ *
  * app.c -- the SDL window and the main loop

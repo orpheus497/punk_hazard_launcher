@@ -59,6 +59,12 @@ return {
         ["R"]         = "reload",
         ["F1"]        = "help",
         ["?"]         = "help",
+
+        -- library editing
+        ["A"]         = "add",
+        ["E"]         = "edit",
+        ["Delete"]    = "remove",
+        ["F2"]        = "confirm",
     },
 
     pad = {
@@ -74,6 +80,8 @@ return {
         ["rightshoulder"] = "page_down",
         ["start"]         = "launch",
         ["back"]          = "sort",
+        ["leftstick"]     = "add",
+        ["rightstick"]    = "edit",
         ["guide"]         = "quit",
     },
 }

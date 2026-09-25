@@ -28,6 +28,7 @@
 #include "ui.h"
 #include "input.h"
 #include "script.h"
+#include "embed.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -161,6 +162,8 @@ search_mode_action(SDL_Keycode k)
 	case SDLK_HOME:     return PH_ACT_HOME;
 	case SDLK_END:      return PH_ACT_END;
 	case SDLK_F11:      return PH_ACT_FULLSCREEN;
+	case SDLK_F2:       return PH_ACT_CONFIRM;
+	case SDLK_TAB:      return PH_ACT_DETAILS;
 	default:            return PH_ACT_NONE;
 	}
 }
@@ -174,6 +177,10 @@ ph_app_run(const struct ph_paths *p)
 	struct ph_gfx   *gfx = NULL;
 	struct ph_ui     *ui = NULL;
 	struct ph_input  *in = NULL;
+	struct ph_embed  *emb = NULL;
+	struct ph_session sess;
+	struct ph_game   *sess_game = NULL;
+	int               sess_embedded = 0, game_full = 0;
 	struct ph_lib     lib;
 	struct ph_config  cfg;
 	struct ph_theme   theme;
@@ -209,6 +216,13 @@ ph_app_run(const struct ph_paths *p)
 	 * choosing between GLX and EGL. */
 	SDL_SetHint(SDL_HINT_VIDEO_X11_FORCE_EGL, "1");
 	SDL_SetHint(SDL_HINT_VIDEO_HIGHDPI_DISABLED, "0");
+	/*
+	 * The window's WM class must equal StartupWMClass in
+	 * punk_hazard.desktop, or a taskbar cannot tell that this window
+	 * belongs to that launcher entry and shows a generic icon beside a
+	 * duplicate entry. SDL derives the class from this hint.
+	 */
+	SDL_SetHint(SDL_HINT_APP_NAME, PH_NAME);
 
 	if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0) {
 		ph_warn("SDL_Init: %s", SDL_GetError());
@@ -256,10 +270,18 @@ ph_app_run(const struct ph_paths *p)
 	if (ph_lib_scan(&lib, p) != 0)
 		ph_warn("could not read %s", p->games);
 
-	if ((ui = ph_ui_create(gfx, sc, &lib, &cfg, &theme, &lay)) == NULL)
+	if ((ui = ph_ui_create(gfx, sc, &lib, &cfg, &theme, &lay, p)) == NULL)
 		goto done;
 	in = ph_input_create(sc);
 	SDL_StartTextInput();
+
+	memset(&sess, 0, sizeof(sess));
+	if (cfg.embed) {
+		emb = ph_embed_create(win);
+		if (ph_embed_why_not(emb) != NULL)
+			ph_info("in-window embedding unavailable: %s",
+			    ph_embed_why_not(emb));
+	}
 
 	/* --- main loop ------------------------------------------------ */
 	t_prev = SDL_GetPerformanceCounter();
@@ -307,7 +329,10 @@ ph_app_run(const struct ph_paths *p)
 				 * first character was routed as a binding.
 				 */
 				skip_text = 0;
-				if (ph_ui_is_searching(ui)) {
+				/* A focused text field -- the search bar or a
+				 * form field -- takes printable keys as text,
+				 * so only this whitelist stays a binding. */
+				if (ph_ui_is_typing(ui)) {
 					if (e.key.keysym.sym == SDLK_BACKSPACE) {
 						ph_ui_backspace(ui);
 						break;
@@ -376,7 +401,17 @@ ph_app_run(const struct ph_paths *p)
 				running = 0;
 				break;
 			case PH_REQ_FULLSCREEN:
-				cfg.fullscreen = !cfg.fullscreen;
+				/*
+				 * With a game embedded, "fullscreen" has to
+				 * mean the game covers the screen and the
+				 * launcher is out of the way -- so the window
+				 * goes fullscreen AND the embedded window is
+				 * grown to fill it, hiding the panels.
+				 */
+				if (sess_embedded)
+					game_full = !game_full;
+				cfg.fullscreen = sess_embedded ? game_full
+				                               : !cfg.fullscreen;
 				SDL_SetWindowFullscreen(win, cfg.fullscreen ?
 				    SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
 				SDL_GL_GetDrawableSize(win, &drawable_w,
@@ -396,14 +431,157 @@ ph_app_run(const struct ph_paths *p)
 				}
 				break;
 			case PH_REQ_LAUNCH:
-				if (target != NULL) {
+				if (target == NULL)
+					break;
+				if (emb != NULL && ph_embed_why_not(emb) == NULL) {
+					/* Non-blocking: the loop keeps drawing
+					 * the chrome around the game. */
+					if (ph_launch_start(target, &sess) == 0) {
+						sess_game = target;
+						sess_embedded = 0;
+						game_full = 0;
+						ph_ui_set_running(ui,
+						    target->title, 0);
+					} else {
+						ph_ui_toast(ui,
+						    "could not launch %s",
+						    target->slug);
+					}
+				} else {
 					run_game(win, ui, &cfg, target);
 					t_prev = SDL_GetPerformanceCounter();
+				}
+				break;
+
+			case PH_REQ_INSTALL: {
+				const struct ph_ui_install *in_req =
+				    ph_ui_install_data(ui);
+				struct ph_install_opts o;
+				char slug[PH_SLUG_MAX];
+
+				/*
+				 * ph_install() can fork a build that runs for
+				 * minutes.  Paint and present a frame first so
+				 * the window says what it is doing instead of
+				 * appearing hung, then do the work.
+				 */
+				ph_ui_toast(ui, "installing %s ...",
+				    in_req->path);
+				ph_gfx_frame_begin(gfx, theme.bg);
+				ph_ui_draw(ui, t_total);
+				ph_gfx_frame_end(gfx, &theme, t_total, cfg.crt);
+				SDL_GL_SwapWindow(win);
+
+				memset(&o, 0, sizeof(o));
+				o.title     = in_req->title[0]     ? in_req->title     : NULL;
+				o.genre     = in_req->genre[0]     ? in_req->genre     : NULL;
+				o.developer = in_req->developer[0] ? in_req->developer : NULL;
+				o.year      = in_req->year[0]      ? in_req->year      : NULL;
+				o.cover     = in_req->cover[0]     ? in_req->cover     : NULL;
+				o.args      = in_req->args[0]      ? in_req->args      : NULL;
+				o.build     = in_req->build;
+
+				if (ph_install(p, in_req->path, &o, slug,
+				    sizeof(slug)) == 0) {
+					ph_ui_release_covers(ui);
+					ph_lib_scan(&lib, p);
+					ph_ui_refresh(ui);
+					ph_ui_toast(ui, "installed %s", slug);
+				} else {
+					ph_ui_toast(ui, "install failed; run "
+					    "with -v for detail");
+				}
+				t_prev = SDL_GetPerformanceCounter();
+				break;
+			}
+
+			case PH_REQ_REMOVE:
+				if (target != NULL) {
+					char slug[PH_SLUG_MAX];
+
+					strlcpy(slug, target->slug, sizeof(slug));
+					ph_ui_release_covers(ui);
+					if (ph_uninstall(p, slug) == 0) {
+						ph_lib_scan(&lib, p);
+						ph_ui_refresh(ui);
+						ph_ui_toast(ui, "removed %s",
+						    slug);
+					} else {
+						ph_lib_scan(&lib, p);
+						ph_ui_refresh(ui);
+						ph_ui_toast(ui, "could not "
+						    "remove %s", slug);
+					}
 				}
 				break;
 			case PH_REQ_NONE:
 			default:
 				break;
+			}
+		}
+
+		/* ---- a game is starting or running ---------------------- */
+		if (sess_game != NULL) {
+			int st = 0;
+
+			if (!sess_embedded &&
+			    ph_embed_try_capture(emb, sess.pid)) {
+				sess_embedded = 1;
+				ph_ui_set_running(ui, sess_game->title, 1);
+			}
+			if (sess_embedded) {
+				int gx, gy, gw, gh, ww = 0, wh = 0;
+				float sc_f = display_scale(win);
+
+				SDL_GetWindowSize(win, &ww, &wh);
+				if (game_full) {
+					ph_embed_place(emb, 0, 0, ww, wh);
+				} else {
+					/*
+					 * ph_ui_grid_rect is in drawable
+					 * pixels; an X11 child window is
+					 * positioned in the window's own
+					 * coordinates, which differ on a
+					 * HiDPI display.
+					 */
+					ph_ui_grid_rect(ui, &gx, &gy, &gw, &gh);
+					if (sc_f > 0.0f) {
+						gx = (int)(gx / sc_f);
+						gy = (int)(gy / sc_f);
+						gw = (int)(gw / sc_f);
+						gh = (int)(gh / sc_f);
+					}
+					ph_embed_place(emb, gx, gy, gw, gh);
+				}
+			}
+			if (ph_launch_poll(&sess, &st) == 1) {
+				struct ph_run_result res;
+				char when[48];
+
+				ph_embed_release(emb);
+				ph_launch_finish(sess_game, &sess, st, &res);
+				ph_human_time(when, sizeof(when), res.seconds);
+				if (st == 0)
+					ph_ui_toast(ui,
+					    "%s \xe2\x80\x94 played %s",
+					    sess_game->title, when);
+				else
+					ph_ui_toast(ui,
+					    "%s exited with status %d after %s",
+					    sess_game->title, st, when);
+				ph_ui_set_running(ui, NULL, 0);
+				sess_game = NULL;
+				sess_embedded = 0;
+				if (game_full) {
+					game_full = 0;
+					cfg.fullscreen = 0;
+					SDL_SetWindowFullscreen(win, 0);
+					SDL_GL_GetDrawableSize(win,
+					    &drawable_w, &drawable_h);
+					ph_gfx_resize(gfx, drawable_w,
+					    drawable_h);
+				}
+				ph_ui_refresh(ui);
 			}
 		}
 
@@ -415,6 +593,9 @@ ph_app_run(const struct ph_paths *p)
 	rc = 0;
 
 done:
+	/* Hand any embedded window back to the root so a game that is still
+	 * running survives the launcher closing. */
+	ph_embed_destroy(emb);
 	ph_input_destroy(in);
 	ph_ui_destroy(ui);
 	ph_gfx_destroy(gfx);

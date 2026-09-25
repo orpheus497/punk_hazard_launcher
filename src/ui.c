@@ -27,6 +27,7 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>	/* unlink(2), used when replacing cover art */
 
 /*
  * Nerd Font icons, in the Private Use Area.  These are why the typeface is
@@ -59,9 +60,45 @@
 #define IC_DOWN     "\xef\x81\xa3"	/* U+F063 arrow-down  */
 #define IC_ENTER    "\xef\x85\x89"	/* U+F149 level-down  */
 #define IC_TASKS    "\xef\x82\xae"	/* U+F0AE tasks       */
+#define IC_EDIT     "\xef\x81\x84"	/* U+F044 pencil      */
+#define IC_TRASH    "\xef\x87\xb8"	/* U+F1F8 trash       */
+#define IC_FOLDER   "\xef\x81\xbc"	/* U+F07C folder-open */
+#define IC_IMAGE    "\xef\x80\xbe"	/* U+F03E image       */
+#define IC_CHECK    "\xef\x80\x8c"	/* U+F00C check       */
+#define IC_CROSS    "\xef\x80\x8d"	/* U+F00D times       */
 
-enum { MODE_LIBRARY = 0, MODE_SEARCH, MODE_HELP };
+enum { MODE_LIBRARY = 0, MODE_SEARCH, MODE_HELP, MODE_FORM };
 enum { FOCUS_GRID = 0, FOCUS_PANEL };
+
+/*
+ * The add/edit form.
+ *
+ * A flat list of labelled text fields followed by two buttons, navigated
+ * with the same up/down that drives everything else.  There is no cursor
+ * within a field: text appends and Backspace removes, exactly like the
+ * search bar, because a full line editor is a lot of machinery for fields
+ * that are mostly pasted paths.
+ */
+enum { FORM_NONE = 0, FORM_ADD, FORM_EDIT };
+
+#define FORM_MAX_FIELDS 7
+#define FORM_VAL_MAX    PH_DESC_MAX
+
+struct form_field {
+	const char *label;
+	const char *hint;
+	size_t      cap;		/* logical limit for this field */
+	char        val[FORM_VAL_MAX];
+};
+
+struct ph_form {
+	int  kind;
+	int  nfields;
+	int  sel;			/* 0..nfields-1 field, then CONFIRM, CANCEL */
+	char slug[PH_SLUG_MAX];		/* FORM_EDIT: which game */
+	char err[192];
+	struct form_field f[FORM_MAX_FIELDS];
+};
 
 /*
  * The options panel.  A table rather than a pile of draw calls, so the
@@ -77,6 +114,9 @@ static const struct {
 } options[] = {
 	{ IC_PLAY,    "LAUNCH",     "Enter", PH_ACT_LAUNCH,     1 },
 	{ IC_STAR,    "FAVOURITE",  "B",     PH_ACT_FAVORITE,   1 },
+	{ IC_EDIT,    "EDIT",       "E",     PH_ACT_EDIT,       1 },
+	{ IC_TRASH,   "REMOVE",     "Del",   PH_ACT_REMOVE,     1 },
+	{ IC_FOLDER,  "ADD GAME",   "A",     PH_ACT_ADD,        0 },
 	{ IC_SEARCH,  "SEARCH",     "/",     PH_ACT_SEARCH,     0 },
 	{ IC_SORT,    "SORT",       "S",     PH_ACT_SORT,       0 },
 	{ IC_THEME,   "THEME",      "T",     PH_ACT_THEME,      0 },
@@ -111,6 +151,10 @@ struct ph_ui {
 	enum ph_sort sort;
 	int    theme_idx;
 
+	const struct ph_paths *paths;
+	struct ph_form         form;
+	struct ph_ui_install   inst;
+
 	enum ph_req     req;
 	struct ph_game *req_game;
 
@@ -118,6 +162,10 @@ struct ph_ui {
 	float  toast_t;
 
 	int    mouse_x, mouse_y, hover, hover_opt;
+
+	/* Set while a game is starting or running. */
+	char   running[PH_TITLE_MAX];
+	int    running_embedded;
 
 	/* Grid geometry, recomputed each frame and cached for hit testing
 	 * because the mouse handlers run between frames. */
@@ -270,10 +318,12 @@ move_sel(struct ph_ui *u, int delta)
  * ------------------------------------------------------------------ */
 struct ph_ui *
 ph_ui_create(struct ph_gfx *g, struct ph_script *sc, struct ph_lib *lib,
-    struct ph_config *cfg, struct ph_theme *theme, const struct ph_layout *lay)
+    struct ph_config *cfg, struct ph_theme *theme, const struct ph_layout *lay,
+    const struct ph_paths *paths)
 {
 	struct ph_ui *u = ph_xcalloc(1, sizeof(*u));
 
+	u->paths = paths;
 	u->g = g;
 	u->sc = sc;
 	u->lib = lib;
@@ -386,6 +436,300 @@ ph_ui_is_searching(const struct ph_ui *u)
 	return u != NULL && u->mode == MODE_SEARCH;
 }
 
+/* Search bar, or a form field: anything where a printable key is text. */
+int
+ph_ui_is_typing(const struct ph_ui *u)
+{
+	if (u == NULL)
+		return 0;
+	if (u->mode == MODE_SEARCH)
+		return 1;
+	return u->mode == MODE_FORM && u->form.sel < u->form.nfields;
+}
+
+const struct ph_ui_install *
+ph_ui_install_data(const struct ph_ui *u)
+{
+	return &u->inst;
+}
+
+/* ------------------------------------------------------------------ *
+ * The add / edit form
+ * ------------------------------------------------------------------ */
+static void
+form_field(struct ph_form *fm, const char *label, const char *hint,
+    size_t cap, const char *init)
+{
+	struct form_field *f;
+
+	if (fm->nfields >= FORM_MAX_FIELDS)
+		return;
+	f = &fm->f[fm->nfields++];
+	f->label = label;
+	f->hint = hint;
+	f->cap = (cap < FORM_VAL_MAX) ? cap : FORM_VAL_MAX;
+	strlcpy(f->val, init != NULL ? init : "", sizeof(f->val));
+}
+
+static int
+form_rows(const struct ph_form *fm)
+{
+	return fm->nfields + 2;		/* fields, then CONFIRM and CANCEL */
+}
+
+static void
+form_open_add(struct ph_ui *u)
+{
+	struct ph_form *fm = &u->form;
+
+	memset(fm, 0, sizeof(*fm));
+	fm->kind = FORM_ADD;
+	form_field(fm, "PATH", "binary, directory, source tree or archive",
+	    PH_PATH_MAX, "");
+	form_field(fm, "TITLE", "defaults to the file or directory name",
+	    PH_TITLE_MAX, "");
+	form_field(fm, "GENRE",     "", 64, "");
+	form_field(fm, "YEAR",      "", 8, "");
+	form_field(fm, "DEVELOPER", "", 96, "");
+	form_field(fm, "COVER", "png or jpg; copied into the library",
+	    PH_PATH_MAX, "");
+	u->mode = MODE_FORM;
+}
+
+static void
+form_open_edit(struct ph_ui *u)
+{
+	struct ph_game *g = sel_game(u);
+	struct ph_form *fm = &u->form;
+
+	if (g == NULL) {
+		ph_ui_toast(u, "nothing selected");
+		return;
+	}
+	memset(fm, 0, sizeof(*fm));
+	fm->kind = FORM_EDIT;
+	strlcpy(fm->slug, g->slug, sizeof(fm->slug));
+	form_field(fm, "TITLE",     "", PH_TITLE_MAX, g->title);
+	form_field(fm, "GENRE",     "", 64, g->genre);
+	form_field(fm, "YEAR",      "", 8,  g->year);
+	form_field(fm, "DEVELOPER", "", 96, g->developer);
+	form_field(fm, "ARGS", "passed to the game; there is no shell",
+	    PH_ARGS_MAX, g->args);
+	form_field(fm, "COVER", "png or jpg; replaces the current art",
+	    PH_PATH_MAX, g->cover);
+	form_field(fm, "DESC", "", PH_DESC_MAX, g->desc);
+	u->mode = MODE_FORM;
+}
+
+/*
+ * Replace a game's cover art.
+ *
+ * The file is copied into the game's own directory so the library stays
+ * self-contained -- a cover that lived in ~/Downloads would break the
+ * moment that was tidied.  Both candidate names are removed first:
+ * find_cover() probes cover.png before cover.jpg, so leaving a stale .png
+ * beside a new .jpg would keep showing the old art.
+ */
+static int
+set_cover(struct ph_ui *u, struct ph_game *g, const char *src, char *err,
+    size_t errsize)
+{
+	char dst[PH_PATH_MAX], alt[PH_PATH_MAX];
+	const char *ext = strrchr(src, '.');
+	int is_jpg = (ext != NULL && (ph_ieq(ext, ".jpg") || ph_ieq(ext, ".jpeg")));
+
+	if (!ph_is_file(src)) {
+		snprintf(err, errsize, "no such image: %s", src);
+		return -1;
+	}
+	if (ph_join(dst, sizeof(dst), g->dir,
+	        is_jpg ? "cover.jpg" : "cover.png") != 0 ||
+	    ph_join(alt, sizeof(alt), g->dir,
+	        is_jpg ? "cover.png" : "cover.jpg") != 0) {
+		snprintf(err, errsize, "path too long");
+		return -1;
+	}
+	unlink(alt);
+	if (strcmp(src, dst) != 0) {
+		unlink(dst);
+		if (ph_copy_file(src, dst) != 0) {
+			snprintf(err, errsize, "could not copy the image");
+			return -1;
+		}
+	}
+	strlcpy(g->cover, dst, sizeof(g->cover));
+
+	/* Drop the cached texture so the tile picks the new art up. */
+	if (g->cover_tex != 0)
+		ph_gfx_tex_free(g->cover_tex);
+	g->cover_tex = 0;
+	g->cover_tried = 0;
+	return 0;
+}
+
+/* Returns 1 when the form closed, 0 when it stays open with fm->err set. */
+static int
+form_submit(struct ph_ui *u)
+{
+	struct ph_form *fm = &u->form;
+
+	fm->err[0] = '\0';
+
+	if (fm->kind == FORM_ADD) {
+		const char *path = fm->f[0].val;
+
+		if (path[0] == '\0') {
+			strlcpy(fm->err, "a path is required", sizeof(fm->err));
+			return 0;
+		}
+		if (!ph_is_file(path) && !ph_is_dir(path)) {
+			strlcpy(fm->err, "no such file or directory",
+			    sizeof(fm->err));
+			return 0;
+		}
+		memset(&u->inst, 0, sizeof(u->inst));
+		strlcpy(u->inst.path,      fm->f[0].val, sizeof(u->inst.path));
+		strlcpy(u->inst.title,     fm->f[1].val, sizeof(u->inst.title));
+		strlcpy(u->inst.genre,     fm->f[2].val, sizeof(u->inst.genre));
+		strlcpy(u->inst.year,      fm->f[3].val, sizeof(u->inst.year));
+		strlcpy(u->inst.developer, fm->f[4].val, sizeof(u->inst.developer));
+		strlcpy(u->inst.cover,     fm->f[5].val, sizeof(u->inst.cover));
+		u->inst.build = 1;
+
+		/* app.c runs it: a source build can take minutes and must not
+		 * happen between two frames. */
+		u->req = PH_REQ_INSTALL;
+		u->mode = MODE_LIBRARY;
+		return 1;
+	}
+
+	/* FORM_EDIT: local, fast, and done here. */
+	{
+		struct ph_game *g = ph_lib_find(u->lib, fm->slug);
+		char keep[PH_SLUG_MAX];
+
+		if (g == NULL) {
+			strlcpy(fm->err, "that game is gone; rescan",
+			    sizeof(fm->err));
+			return 0;
+		}
+		if (fm->f[0].val[0] == '\0') {
+			strlcpy(fm->err, "a title is required", sizeof(fm->err));
+			return 0;
+		}
+		if (fm->f[5].val[0] != '\0' &&
+		    strcmp(fm->f[5].val, g->cover) != 0 &&
+		    set_cover(u, g, fm->f[5].val, fm->err, sizeof(fm->err)) != 0)
+			return 0;
+		if (fm->f[5].val[0] == '\0')
+			g->cover[0] = '\0';
+
+		strlcpy(g->title,     fm->f[0].val, sizeof(g->title));
+		strlcpy(g->genre,     fm->f[1].val, sizeof(g->genre));
+		strlcpy(g->year,      fm->f[2].val, sizeof(g->year));
+		strlcpy(g->developer, fm->f[3].val, sizeof(g->developer));
+		strlcpy(g->args,      fm->f[4].val, sizeof(g->args));
+		strlcpy(g->desc,      fm->f[6].val, sizeof(g->desc));
+
+		if (ph_game_save(g) != 0) {
+			strlcpy(fm->err, "could not write the manifest",
+			    sizeof(fm->err));
+			return 0;
+		}
+		strlcpy(keep, g->slug, sizeof(keep));
+		ph_lib_sort(u->lib, u->sort);
+		rebuild_view(u, keep);
+		ensure_visible(u);
+		ph_ui_toast(u, "saved %s", fm->f[0].val);
+		u->mode = MODE_LIBRARY;
+		return 1;
+	}
+}
+
+static void
+form_action(struct ph_ui *u, enum ph_action a)
+{
+	struct ph_form *fm = &u->form;
+	int rows = form_rows(fm);
+
+	switch (a) {
+	case PH_ACT_UP:
+		fm->sel = (fm->sel + rows - 1) % rows;
+		break;
+	case PH_ACT_DOWN:
+		fm->sel = (fm->sel + 1) % rows;
+		break;
+	case PH_ACT_BACK:
+	case PH_ACT_QUIT:
+		u->mode = MODE_LIBRARY;
+		break;
+	case PH_ACT_CONFIRM:
+		form_submit(u);
+		break;
+	case PH_ACT_LAUNCH:
+		if (fm->sel < fm->nfields)
+			fm->sel++;			/* next field */
+		else if (fm->sel == fm->nfields)
+			form_submit(u);			/* CONFIRM */
+		else
+			u->mode = MODE_LIBRARY;		/* CANCEL  */
+		break;
+	default:
+		break;
+	}
+}
+
+static void
+form_text(struct ph_ui *u, const char *utf8)
+{
+	struct form_field *f;
+	size_t have, add;
+
+	if (u->form.sel >= u->form.nfields)
+		return;
+	f = &u->form.f[u->form.sel];
+	have = strlen(f->val);
+	add = strlen(utf8);
+	if (have + add + 1 > f->cap)
+		return;
+	memcpy(f->val + have, utf8, add + 1);
+}
+
+static void
+form_backspace(struct ph_ui *u)
+{
+	struct form_field *f;
+	size_t n;
+
+	if (u->form.sel >= u->form.nfields)
+		return;
+	f = &u->form.f[u->form.sel];
+	n = strlen(f->val);
+	/* Step back over a whole UTF-8 sequence, not one byte. */
+	while (n > 0 && ((unsigned char)f->val[n - 1] & 0xc0) == 0x80)
+		n--;
+	if (n > 0)
+		n--;
+	f->val[n] = '\0';
+}
+
+
+void
+ph_ui_grid_rect(const struct ph_ui *u, int *x, int *y, int *w, int *h)
+{
+	if (x != NULL) *x = (int)u->gx;
+	if (y != NULL) *y = (int)u->gy;
+	if (w != NULL) *w = (int)u->gw;
+	if (h != NULL) *h = (int)u->gh;
+}
+
+void
+ph_ui_set_running(struct ph_ui *u, const char *title, int embedded)
+{
+	strlcpy(u->running, title != NULL ? title : "", sizeof(u->running));
+	u->running_embedded = embedded;
+}
+
 /* ------------------------------------------------------------------ *
  * Input
  * ------------------------------------------------------------------ */
@@ -408,6 +752,12 @@ ph_ui_action(struct ph_ui *u, enum ph_action a)
 {
 	int page = (u->cols > 0 && u->rows_visible > 0)
 	    ? u->cols * u->rows_visible : 4;
+
+	/* A form owns the keyboard completely while it is open. */
+	if (u->mode == MODE_FORM) {
+		form_action(u, a);
+		return;
+	}
 
 	if (u->mode == MODE_HELP && a != PH_ACT_NONE) {
 		if (a == PH_ACT_BACK || a == PH_ACT_HELP || a == PH_ACT_QUIT) {
@@ -533,6 +883,25 @@ ph_ui_action(struct ph_ui *u, enum ph_action a)
 
 	case PH_ACT_THEME: cycle_theme(u, +1); break;
 
+	case PH_ACT_ADD:  form_open_add(u);  break;
+	case PH_ACT_EDIT: form_open_edit(u); break;
+
+	case PH_ACT_REMOVE: {
+		struct ph_game *g = sel_game(u);
+
+		if (g == NULL) {
+			ph_ui_toast(u, "nothing selected");
+			break;
+		}
+		/* app.c owns the deletion: it has to drop the cover textures
+		 * and rescan once the files are gone. */
+		u->req = PH_REQ_REMOVE;
+		u->req_game = g;
+		break;
+	}
+
+	case PH_ACT_CONFIRM: break;
+
 	case PH_ACT_SORT: {
 		char keep[PH_SLUG_MAX];
 
@@ -575,7 +944,13 @@ ph_ui_text(struct ph_ui *u, const char *utf8)
 {
 	size_t have, add;
 
-	if (u->mode != MODE_SEARCH || utf8 == NULL)
+	if (utf8 == NULL)
+		return;
+	if (u->mode == MODE_FORM) {
+		form_text(u, utf8);
+		return;
+	}
+	if (u->mode != MODE_SEARCH)
 		return;
 	have = strlen(u->query);
 	add = strlen(utf8);
@@ -595,8 +970,13 @@ ph_ui_text(struct ph_ui *u, const char *utf8)
 void
 ph_ui_backspace(struct ph_ui *u)
 {
-	size_t n = strlen(u->query);
+	size_t n;
 
+	if (u->mode == MODE_FORM) {
+		form_backspace(u);
+		return;
+	}
+	n = strlen(u->query);
 	if (u->mode != MODE_SEARCH || n == 0)
 		return;
 	/* Step back over a whole UTF-8 sequence, not one byte. */
@@ -635,19 +1015,63 @@ tile_at(struct ph_ui *u, int x, int y)
 	return idx;
 }
 
-/* Which option row is under (x,y)?  -1 for none. */
+
+/*
+ * Options-block geometry, shared by the renderer and the hit test so the
+ * two can never disagree about where a row is.
+ *
+ * Two columns once the panel is wide enough: the list is now long enough
+ * (launch, favourite, edit, remove, add, search, sort, theme, crt,
+ * fullscreen, rescan, quit) that a single column ate the panel and left no
+ * room for the details above it.
+ */
+struct opt_geom {
+	float top, rowh, colw;
+	int   cols, rows;
+};
+
+static void
+opt_geometry(const struct ph_ui *u, struct opt_geom *o)
+{
+	float pad = (float)u->lay.pad;
+	float inner = u->pw - pad * 2.0f;
+	float cap, floor_h;
+
+	o->cols = (u->pw >= 380.0f) ? 2 : 1;
+	o->rows = (NOPTIONS + o->cols - 1) / o->cols;
+	o->colw = inner / (float)o->cols;
+
+	o->rowh = ph_font_height(u->f_body) * 1.7f;
+	cap = u->ph_ * 0.45f;
+	floor_h = ph_font_height(u->f_body) * 1.25f;
+	if (o->rowh * (float)o->rows > cap)
+		o->rowh = cap / (float)o->rows;
+	if (o->rowh < floor_h)
+		o->rowh = floor_h;
+
+	o->top = u->py + u->ph_ - pad - o->rowh * (float)o->rows;
+}
+
+/* Which option is under (x,y)?  -1 for none. */
 static int
 option_at(struct ph_ui *u, int x, int y)
 {
-	float rowh = ph_font_height(u->f_body) * 1.75f;
-	float top = u->py + u->ph_ - (float)u->lay.pad - rowh * (float)NOPTIONS;
-	int idx;
+	struct opt_geom o;
+	float pad = (float)u->lay.pad;
+	int row, col, idx;
 
-	if ((float)x < u->px || (float)x > u->px + u->pw)
+	if (u->pw <= 0.0f)
 		return -1;
-	if ((float)y < top || (float)y > u->py + u->ph_)
+	opt_geometry(u, &o);
+	if ((float)x < u->px + pad * 0.5f || (float)x > u->px + u->pw - pad * 0.5f)
 		return -1;
-	idx = (int)(((float)y - top) / rowh);
+	if ((float)y < o.top || (float)y > o.top + o.rowh * (float)o.rows)
+		return -1;
+	row = (int)(((float)y - o.top) / o.rowh);
+	col = (int)(((float)x - (u->px + pad)) / o.colw);
+	if (col < 0) col = 0;
+	if (col >= o.cols) col = o.cols - 1;
+	idx = col * o.rows + row;
 	return (idx >= 0 && idx < NOPTIONS) ? idx : -1;
 }
 
@@ -1001,6 +1425,34 @@ draw_grid(struct ph_ui *u)
 
 	ph_gfx_rect(g, u->gx, u->gy, u->gw, u->gh, fade(t->panel, 0.55f));
 
+	/*
+	 * A game is starting or running in this space.  When it is embedded
+	 * its own X window covers this area, so anything drawn here is only
+	 * seen in the moment before it is adopted -- which is exactly when
+	 * the user needs to be told something is happening.
+	 */
+	if (u->running[0] != '\0') {
+		const char *what = u->running_embedded ? "RUNNING" : "LAUNCHING";
+		float cy = u->gy + u->gh * 0.42f;
+		float iw = ph_text_width(u->f_huge, IC_PLAY);
+		float tw;
+
+		ph_gfx_rect(g, u->gx, u->gy, u->gw, u->gh, fade(t->bg, 0.92f));
+		ph_text_draw(g, u->f_huge, u->gx + (u->gw - iw) * 0.5f,
+		    cy - ph_font_height(u->f_huge), IC_PLAY,
+		    fade(t->accent, 0.45f));
+		tw = ph_text_width(u->f_title, u->running);
+		ph_text_draw_clip(g, u->f_title,
+		    u->gx + (u->gw - tw) * 0.5f, cy + 10.0f, u->gw - 40.0f,
+		    u->running, t->text_bright);
+		tw = ph_text_width(u->f_small, what);
+		ph_text_draw(g, u->f_small, u->gx + (u->gw - tw) * 0.5f,
+		    cy + 10.0f + ph_font_height(u->f_title) * 1.3f, what,
+		    fade(t->accent, 0.9f));
+		ph_gfx_border(g, u->gx, u->gy, u->gw, u->gh, 1.0f, t->frame);
+		return;
+	}
+
 	if (u->nview == 0) {
 		draw_empty(u, u->gx, u->gy, u->gw, u->gh);
 		ph_gfx_border(g, u->gx, u->gy, u->gw, u->gh, 1.0f, t->frame);
@@ -1087,7 +1539,8 @@ draw_panel(struct ph_ui *u)
 	float pad = (float)u->lay.pad;
 	float x = u->px, y = u->py, w = u->pw, h = u->ph_;
 	float inner = w - pad * 2.0f;
-	float ty, opt_rowh, opt_top, opt_head_y, exec_y;
+	float ty, opt_top, opt_head_y, exec_y;
+	struct opt_geom og;
 	int i;
 
 	ph_gfx_rect(g, x, y, w, h, t->panel);
@@ -1101,24 +1554,8 @@ draw_panel(struct ph_ui *u)
 	 * what the description may use.  Computing these first is what keeps
 	 * the blocks from overlapping when the window is short.
 	 */
-	opt_rowh   = ph_font_height(u->f_body) * 1.75f;
-	/*
-	 * Cap the options block at a little over half the panel.  At a
-	 * comfortable row height nine options need ~410px, which on a
-	 * 1440x810 window is most of the panel and pushed the description
-	 * -- the thing a details panel is chiefly for -- off the bottom
-	 * entirely.  Compact the rows instead, down to a readable floor.
-	 */
-	{
-		float cap = h * 0.55f;
-		float floor_h = ph_font_height(u->f_body) * 1.25f;
-
-		if (opt_rowh * (float)NOPTIONS > cap)
-			opt_rowh = cap / (float)NOPTIONS;
-		if (opt_rowh < floor_h)
-			opt_rowh = floor_h;
-	}
-	opt_top    = y + h - pad - opt_rowh * (float)NOPTIONS;
+	opt_geometry(u, &og);
+	opt_top    = og.top;
 	opt_head_y = opt_top - ph_font_height(u->f_small) * 1.7f;
 	exec_y     = opt_head_y - ph_font_height(u->f_small) * 1.9f;
 
@@ -1201,40 +1638,40 @@ draw_panel(struct ph_ui *u)
 	    inner, 1.0f, fade(t->accent, 0.35f));
 
 	for (i = 0; i < NOPTIONS; i++) {
-		float ry = opt_top + (float)i * opt_rowh;
+		int col = i / og.rows, row = i % og.rows;
+		float cx = x + pad + (float)col * og.colw;
+		float ry = opt_top + (float)row * og.rowh;
 		int active = (u->focus == FOCUS_PANEL && i == u->opt_sel);
 		int dimmed = options[i].needs_game && gm == NULL;
 		ph_rgba lc, kc;
-		float tx;
+		float kw;
 
-		if (active)
-			ph_gfx_rect(g, x + pad * 0.5f, ry, w - pad, opt_rowh,
+		if (active) {
+			ph_gfx_rect(g, cx - pad * 0.5f, ry, og.colw, og.rowh,
 			    t->sel_bg);
-		if (i == u->hover_opt && !active)
-			ph_gfx_rect(g, x + pad * 0.5f, ry, w - pad, opt_rowh,
-			    fade(t->accent, 0.07f));
-		if (active)
-			ph_gfx_rect(g, x + pad * 0.5f, ry, 3.0f, opt_rowh,
+			ph_gfx_rect(g, cx - pad * 0.5f, ry, 3.0f, og.rowh,
 			    t->accent);
+		} else if (i == u->hover_opt) {
+			ph_gfx_rect(g, cx - pad * 0.5f, ry, og.colw, og.rowh,
+			    fade(t->accent, 0.07f));
+		}
 
 		lc = dimmed ? fade(t->text_dim, 0.45f)
 		            : (active ? t->sel_fg : t->text);
 		kc = dimmed ? fade(t->text_dim, 0.35f) : fade(t->text_dim, 0.8f);
 
-		tx = x + pad;
-		ph_text_draw(g, u->f_body, tx,
-		    ry + (opt_rowh - ph_font_height(u->f_body)) * 0.5f,
+		ph_text_draw(g, u->f_small, cx,
+		    ry + (og.rowh - ph_font_height(u->f_small)) * 0.5f,
 		    options[i].icon, dimmed ? kc : t->accent);
-		ph_text_draw(g, u->f_body, tx + 30.0f,
-		    ry + (opt_rowh - ph_font_height(u->f_body)) * 0.5f,
-		    options[i].label, lc);
-		{
-			float kw = ph_text_width(u->f_small, options[i].key);
 
-			ph_text_draw(g, u->f_small, x + w - pad - kw,
-			    ry + (opt_rowh - ph_font_height(u->f_small)) * 0.5f,
-			    options[i].key, kc);
-		}
+		kw = ph_text_width(u->f_small, options[i].key);
+		ph_text_draw_clip(g, u->f_small, cx + 24.0f,
+		    ry + (og.rowh - ph_font_height(u->f_small)) * 0.5f,
+		    og.colw - 30.0f - kw, options[i].label, lc);
+		ph_text_draw(g, u->f_small,
+		    cx + og.colw - pad * 0.75f - kw,
+		    ry + (og.rowh - ph_font_height(u->f_small)) * 0.5f,
+		    options[i].key, kc);
 	}
 }
 
@@ -1370,10 +1807,17 @@ draw_help(struct ph_ui *u, float W, float H)
 		"  S                     cycle sort: title, recent, playtime, added, year",
 		"  R                     rescan the library from disk",
 		"",
+		"LIBRARY",
+		"  A                     add a game: path, title, art, metadata",
+		"  E                     edit the selected game, including its cover",
+		"  Del                   remove the selected game and its files",
+		"  in a form: arrows move, Enter next, F2 save, Esc cancel",
+		"",
 		"DISPLAY",
 		"  F11 or F              toggle fullscreen",
 		"  C                     toggle the CRT post-process",
 		"  T                     cycle theme",
+		"  F11 while a game runs embedded gives it the whole screen",
 		"",
 		"GAMEPAD",
 		"  d-pad / left stick    move       A  launch       B  back",
@@ -1407,6 +1851,137 @@ draw_help(struct ph_ui *u, float W, float H)
 			    rows[i], is_head ? t->accent2 : fade(t->text, 0.9f));
 		ty += ph_font_height(u->f_small) * 1.34f;
 	}
+}
+
+
+static void
+draw_form(struct ph_ui *u, float W, float H, float time_sec)
+{
+	const struct ph_theme *t = u->theme;
+	struct ph_gfx *g = u->g;
+	struct ph_form *fm = &u->form;
+	float pad = (float)u->lay.pad;
+	float rowh = ph_font_height(u->f_body) * 1.9f;
+	float labw = 150.0f;
+	float pw = W * 0.72f, phh, px, py, ty;
+	const char *title;
+	int i;
+
+	if (pw > 820.0f)
+		pw = 820.0f;
+	phh = pad * 2.0f + ph_font_height(u->f_title) * 1.6f
+	    + rowh * (float)fm->nfields
+	    + rowh * 1.5f				/* buttons  */
+	    + ph_font_height(u->f_small) * 2.6f;	/* hint+err */
+	if (phh > H - 40.0f)
+		phh = H - 40.0f;
+	px = (W - pw) * 0.5f;
+	py = (H - phh) * 0.5f;
+
+	ph_gfx_rect(g, 0, 0, W, H, fade(t->shadow, 0.9f));
+	ph_gfx_rect(g, px, py, pw, phh, t->panel);
+	ph_gfx_border(g, px, py, pw, phh, 2.0f, t->accent);
+
+	title = (fm->kind == FORM_ADD) ? IC_FOLDER "  ADD GAME"
+	                               : IC_EDIT   "  EDIT GAME";
+	ty = py + pad;
+	ph_text_draw(g, u->f_title, px + pad, ty, title, t->accent);
+	ty += ph_font_height(u->f_title) * 1.55f;
+
+	for (i = 0; i < fm->nfields; i++) {
+		struct form_field *f = &fm->f[i];
+		int focused = (fm->sel == i);
+		float bx = px + pad + labw;
+		float bw = pw - pad * 2.0f - labw;
+		float tx;
+
+		ph_text_draw(g, u->f_small, px + pad,
+		    ty + (rowh - ph_font_height(u->f_small)) * 0.5f,
+		    f->label, fade(t->text_dim, focused ? 1.0f : 0.65f));
+
+		ph_gfx_rect(g, bx, ty + 3.0f, bw, rowh - 6.0f,
+		    focused ? fade(t->accent, 0.08f) : fade(t->bg, 0.7f));
+		ph_gfx_border(g, bx, ty + 3.0f, bw, rowh - 6.0f, 1.0f,
+		    focused ? t->accent : fade(t->frame, 0.9f));
+
+		/*
+		 * There is no horizontal scroll, so a long value is shown
+		 * tail-first: while you are typing a path, the end of it is
+		 * the part you are working on.
+		 */
+		{
+			const char *v = f->val;
+			float avail = bw - 24.0f;
+
+			while (*v != '\0' && ph_text_width(u->f_body, v) > avail) {
+				const char *step = v;
+
+				ph_utf8_next(&step);
+				v = step;
+			}
+			tx = ph_text_draw(g, u->f_body, bx + 10.0f,
+			    ty + (rowh - ph_font_height(u->f_body)) * 0.5f,
+			    v, focused ? t->text_bright : t->text);
+		}
+		if (focused && fmodf(time_sec, 1.0f) < 0.6f)
+			ph_gfx_rect(g, tx + 2.0f, ty + rowh * 0.28f, 9.0f,
+			    rowh * 0.44f, t->accent);
+		ty += rowh;
+	}
+
+	/* buttons */
+	{
+		float bw = (pw - pad * 3.0f) * 0.5f;
+		float by = ty + 6.0f;
+		int ok_focus = (fm->sel == fm->nfields);
+		int no_focus = (fm->sel == fm->nfields + 1);
+
+		ph_gfx_rect(g, px + pad, by, bw, rowh,
+		    ok_focus ? fade(t->ok, 0.22f) : fade(t->panel_alt, 0.9f));
+		ph_gfx_border(g, px + pad, by, bw, rowh, ok_focus ? 2.0f : 1.0f,
+		    ok_focus ? t->ok : fade(t->frame, 0.9f));
+		{
+			const char *s = IC_CHECK "  SAVE";
+			float sw = ph_text_width(u->f_body, s);
+
+			ph_text_draw(g, u->f_body, px + pad + (bw - sw) * 0.5f,
+			    by + (rowh - ph_font_height(u->f_body)) * 0.5f, s,
+			    ok_focus ? t->text_bright : t->text);
+		}
+
+		ph_gfx_rect(g, px + pad * 2.0f + bw, by, bw, rowh,
+		    no_focus ? fade(t->danger, 0.22f) : fade(t->panel_alt, 0.9f));
+		ph_gfx_border(g, px + pad * 2.0f + bw, by, bw, rowh,
+		    no_focus ? 2.0f : 1.0f,
+		    no_focus ? t->danger : fade(t->frame, 0.9f));
+		{
+			const char *s = IC_CROSS "  CANCEL";
+			float sw = ph_text_width(u->f_body, s);
+
+			ph_text_draw(g, u->f_body,
+			    px + pad * 2.0f + bw + (bw - sw) * 0.5f,
+			    by + (rowh - ph_font_height(u->f_body)) * 0.5f, s,
+			    no_focus ? t->text_bright : t->text);
+		}
+		ty = by + rowh + 8.0f;
+	}
+
+	/* error takes precedence over the field hint */
+	if (fm->err[0] != '\0') {
+		ph_text_draw_clip(g, u->f_small, px + pad, ty,
+		    pw - pad * 2.0f, fm->err, t->danger);
+	} else {
+		const char *hint = "";
+
+		if (fm->sel < fm->nfields && fm->f[fm->sel].hint != NULL)
+			hint = fm->f[fm->sel].hint;
+		ph_text_draw_clip(g, u->f_small, px + pad, ty,
+		    pw - pad * 2.0f, hint, fade(t->text_dim, 0.85f));
+	}
+	ty += ph_font_height(u->f_small) * 1.4f;
+	ph_text_draw(g, u->f_small, px + pad, ty,
+	    IC_UP IC_DOWN " field    " IC_ENTER " next / save    "
+	    "F2 save    Esc cancel", fade(t->text_dim, 0.6f));
 }
 
 /* ---------------------------- the frame --------------------------- */
@@ -1494,4 +2069,6 @@ ph_ui_draw(struct ph_ui *u, float time_sec)
 
 	if (u->mode == MODE_HELP)
 		draw_help(u, W, H);
+	if (u->mode == MODE_FORM)
+		draw_form(u, W, H, time_sec);
 }

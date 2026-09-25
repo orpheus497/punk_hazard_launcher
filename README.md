@@ -2,10 +2,16 @@
 
 A retro, console-style game launcher for **FreeBSD**, written in **C11 and Lua 5.4**.
 
-You point it at a binary, a directory, a source tree or an archive. It installs
-the game into a plain-text library and gives you a full-screen front end: a
-box-art grid, a details-and-options panel, and a live system monitor — driven
-by keyboard, mouse or gamepad, on **X11 or Wayland**.
+You point it at a binary, a directory, a source tree or an archive — from the
+shell or from inside the launcher itself. It installs the game into a
+plain-text library and gives you a full-screen front end: a box-art grid, a
+details-and-options panel, and a live system monitor — driven by keyboard,
+mouse or gamepad, on **X11 or Wayland**.
+
+On X11 a game runs **inside the launcher window**, in the grid area, with the
+panels still live around it; `F11` then gives it the whole screen. (Wayland
+does not permit this — see [Running a game inside the
+window](#9-running-a-game-inside-the-window).)
 
 ![punkhazard, hazard theme](assets/screenshot.png)
 
@@ -42,6 +48,7 @@ tree.
 - [Dependencies and licences](#dependencies-and-licences)
 - [About the typeface licence](#about-the-typeface-licence)
 - [Testing without a display](#testing-without-a-display)
+- [Desktop integration](#desktop-integration)
 - [Known limitations](#known-limitations)
 - [Sources](#sources)
 
@@ -79,6 +86,11 @@ pkg install sdl2 lua54 mesa-libs mesa-dri
 | `lua54` | themes, layout, keymap, build recipes |
 | `mesa-libs` | EGL and OpenGL ES 2.0 headers/libraries |
 | `mesa-dri` | the actual GPU driver at runtime |
+| `libX11` | *optional*: running a game inside the launcher window |
+
+`libX11` is detected by `./configure` and is never required. Without it — or
+under Wayland, which cannot do this at all — a launched game simply takes the
+screen while the launcher hides, which is the behaviour on any other platform.
 
 A C11 compiler (base `clang` is fine) and `pkg-config`.
 
@@ -168,12 +180,30 @@ Four regions, all driven from the current selection:
 Below 960px wide the panel is dropped and the grid takes the whole width; the
 top panel still carries the selected game's details.
 
+### Adding and editing from inside the launcher
+
+You do not have to drop to a shell. `A` opens an import form — path, title,
+genre, year, developer, cover art — and `E` edits the selected game, including
+replacing its box art and its description. `Del` removes a game and its files.
+
+![the add form](assets/screenshot-add.png)
+
+Arrows move between fields, `Enter` advances (and saves on the SAVE button),
+`F2` saves from anywhere, `Esc` cancels. A chosen cover is **copied into the
+game's own directory**, so the library stays self-contained rather than
+depending on a file in `~/Downloads` that will not survive a tidy-up.
+
+An import runs `ph_install()`, which may fork a build lasting minutes. The
+launcher paints a frame saying so *before* it starts, rather than appearing
+hung.
+
 ### Keyboard
 
 | Key | Action |
 | --- | --- |
 | arrows / `h` `j` `k` `l` | move around the grid |
 | `Tab` | move focus: grid ⇄ options panel |
+| `A` / `E` / `Del` | add a game / edit it / remove it |
 | `PageUp` `PageDown` | move a screenful |
 | `Home` `End` | first / last entry |
 | `Return` `Space` | launch (or activate the highlighted option) |
@@ -374,6 +404,7 @@ GNU make, cargo and go. Return `{}` to disable building entirely.
                     │            ├── text.c ─ stb_truetype → GL glyph atlas
                     │            └── gfx.c ── GLES2 batcher + CRT post-process
                     │
+                    │     ├── embed.c ─ X11 window adoption (see §9)
                     ├── sysmon.c ── sysctl(3) → the bottom panel
                     ├── catalog.c ─ manifests, scan, sort, filter
                     ├── install.c ─ import pipeline
@@ -573,6 +604,49 @@ there. The two live in separate `#ifdef` blocks rather than behind a
 pretend-portable abstraction, because they genuinely are different interfaces
 with different semantics.
 
+### 9. Running a game inside the window
+
+On X11 a launched game is reparented into the launcher's own window and
+sized to the grid area. The panels stay live around it, and `F11` grows it to
+fill the screen with the launcher hidden behind it. When it exits, its window
+is handed back to the root and the grid returns.
+
+This works because X has always allowed one client to adopt another client's
+window — `XReparentWindow(3)` is the same mechanism behind every window
+manager's title bars, and behind XEmbed. The game's top-level window is found
+by matching `_NET_WM_PID` against the pid we forked.
+
+**On Wayland this is impossible, and no amount of work here changes that.**
+Wayland object ids are scoped to a single client connection: a client cannot
+name — let alone adopt — a surface belonging to another process. `wl_subsurface`
+composes only surfaces the *same* client created. Embedding another
+application is a compositor's job, and a launcher is not a compositor. So
+under Wayland `ph_embed_create()` reports why it cannot help and the launcher
+falls back to hiding itself while the game takes the screen. That is the
+honest behaviour rather than a broken imitation of the X11 one.
+
+It is best-effort even on X11. A game that maps no top-level window, reports
+no `_NET_WM_PID`, forks a wrapper we cannot follow, or sets its own fullscreen
+will simply not be captured — and the launcher then behaves exactly as it does
+under Wayland. Two details that matter in practice:
+
+- **`WM_STATE` is not required.** It would be the obvious test for "a managed
+  top-level", but only a window manager sets it, so requiring it would break
+  embedding under a bare `startx` or in a kiosk. The test is instead what is
+  true regardless of who is managing the window: mapped, viewable,
+  `InputOutput`, and **not** override-redirect (which marks menus, tooltips
+  and splash surfaces that must never be reparented).
+- **Errors are swallowed.** A game can exit between the moment its window is
+  found and the moment it is touched. Every such race surfaces as a
+  `BadWindow`, and Xlib's default handler calls `exit(3)` — which would take
+  the launcher down with it. `embed.c` installs its own handler.
+
+Because the game covers only the grid area, the surrounding panels are still
+yours: clicking them returns input focus to the launcher, which is how `F11`
+reaches it again once the game has taken the keyboard.
+
+Set `embed = false` in `config.lua` to always use the hide-and-run path.
+
 ---
 
 ## Dependencies and licences
@@ -584,6 +658,7 @@ Every dependency is permissive. There is no GPL, LGPL or MPL anywhere.
 | SDL2 | 2.32.10 | **zlib** | window, input, fullscreen, gamepad |
 | Lua | 5.4.8 | **MIT** | themes, layout, keys, build recipes |
 | Mesa (EGL/GLESv2) | — | **MIT** | the GL implementation |
+| libX11 | 1.8+ | **MIT** | *optional*: in-window game embedding |
 | stb_truetype.h | v1.26 | **MIT / public domain** | glyph rasterisation (vendored) |
 | stb_image.h | v2.30 | **MIT / public domain** | cover art decoding (vendored) |
 | stb_image_write.h | v1.16 | **MIT / public domain** | test harness only (vendored) |
@@ -657,6 +732,20 @@ enough. It is not installed by `make install`.
 This is not decoration. It is how the `mediump` shader bug described below was
 found, and every screenshot in this README was produced by it.
 
+The other risky thing punkhazard does — reaching into another client's window
+— has its own harness, because "it silently did nothing" and "it worked" look
+identical from the outside:
+
+```sh
+make embedtest
+Xvfb :99 -screen 0 1280x800x24 &
+DISPLAY=:99 ./tools/embedtest /path/to/any-windowed-program
+```
+
+It forks the program, captures its window, and then *asserts with
+`XQueryTree`* that the window's parent really is the launcher's window, that
+placement moves and resizes it, and that releasing returns it to the root.
+
 > **A real bug it caught.** The CRT shader originally used the standard GLSL
 > noise hash, `fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453)`, fed
 > screen-pixel coordinates. GLSL ES 2.0 only *guarantees* `mediump` in fragment
@@ -668,6 +757,30 @@ found, and every screenshot in this README was produced by it.
 > happened. The fix was a hash whose intermediates all stay under ~1000, plus a
 > `GL_FRAGMENT_PRECISION_HIGH` preamble. This would have broken on Mali,
 > Adreno and PowerVR, not just on llvmpipe.
+
+---
+
+## Desktop integration
+
+`make install` places a validated desktop entry and a full icon set:
+
+```
+$PREFIX/share/applications/punk_hazard.desktop
+$PREFIX/share/icons/hicolor/scalable/apps/punkhazard.svg
+$PREFIX/share/icons/hicolor/{16,22,24,32,48,64,128,256,512}x…/apps/punkhazard.png
+```
+
+The icon is hand-written SVG — a hazard triangle in toxic green with a magenta
+bolt, carrying the same scanlines and corner ticks as the launcher itself — and
+the PNGs are rasterised from it, so every size is the same drawing rather than
+nine separate ones.
+
+The entry sets `StartupWMClass=punkhazard`, and the launcher sets
+`SDL_HINT_APP_NAME` to match. Without that pairing a taskbar cannot tell that
+the running window belongs to that entry, and shows a generic icon beside a
+duplicate launcher entry. Verified with `desktop-file-validate`, and the
+resulting window really does report `("punkhazard" "punkhazard")` as its WM
+class.
 
 ---
 
@@ -686,6 +799,12 @@ found, and every screenshot in this README was produced by it.
 - **Text is Latin-script.** There is no bidi and no complex-script shaping;
   glyphs are laid out left to right with kerning.
 - **One library at a time.** Switch with `PUNKHAZARD_ROOT`.
+- **In-window game embedding is X11-only**, and best-effort there. See §9.
+- **An import blocks the window** while it runs. A source build can take
+  minutes; the launcher says what it is doing but does not animate during it.
+- **Form fields have no cursor.** Text appends and Backspace removes, as in
+  the search bar. A full line editor is a lot of machinery for fields that are
+  mostly pasted paths.
 - **Tested on FreeBSD's toolchain expectations, developed on Linux.** The
   FreeBSD-specific claims in this document are cited from the FreeBSD source
   tree and ports tree rather than from a running FreeBSD box.
@@ -764,6 +883,19 @@ Every factual claim above is from a primary source. Quotes are verbatim.
 
 - `lua.h` copyright block — the MIT licence text, *"Copyright (C) 1994-2026
   Lua.org, PUC-Rio."*
+
+**X11 / Wayland**:
+
+- `XReparentWindow(3)` — the X11 mechanism used to adopt a game's window.
+- Wayland core protocol, `wl_subcompositor.get_subsurface` (installed at
+  `/usr/share/wayland/wayland.xml`) — subsurfaces are created from
+  `wl_surface` objects, and Wayland object ids are per-connection, so a client
+  cannot reference another client's surface. This is why §9 is X11-only.
+- `graphics/wayland` 1.26.0 and `x11/libX11` in the FreeBSD ports tree.
+
+**freedesktop.org** — the Desktop Entry Specification (`Type`, `Categories`,
+`StartupWMClass`) and the Icon Theme Specification (`hicolor` layout). The
+generated entry passes `desktop-file-validate` with no output.
 
 **Khronos** — the `mediump` range limit (16-bit float, maximum finite value
 65504) is the OpenGL ES Shading Language 1.00 minimum precision requirement;

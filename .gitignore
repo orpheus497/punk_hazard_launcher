@@ -54,3 +54,4 @@ cscope.out
 /gen/
 /tools/bin2c
 /tools/phshot
+/tools/embedtest
